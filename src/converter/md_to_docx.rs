@@ -379,7 +379,8 @@ pub fn md_to_docx(md_content: &str) -> Result<Vec<u8>, anyhow::Error> {
 
                     let p = current_paragraph.take().unwrap_or_else(Paragraph::new);
                     if let Some(ref url) = link_url {
-                        let hl = Hyperlink::new(url, HyperlinkType::External).add_run(run);
+                        let hl_run = run.color("0563C1").underline("single");
+                        let hl = Hyperlink::new(url, HyperlinkType::External).add_run(hl_run);
                         current_paragraph = Some(p.add_hyperlink(hl));
                     } else {
                         current_paragraph = Some(p.add_run(run));
@@ -409,7 +410,13 @@ pub fn md_to_docx(md_content: &str) -> Result<Vec<u8>, anyhow::Error> {
                 if strike { run = run.strike(); }
 
                 let p = current_paragraph.take().unwrap_or_else(Paragraph::new);
-                current_paragraph = Some(p.add_run(run));
+                if let Some(ref url) = link_url {
+                    let hl_run = run.color("0563C1").underline("single");
+                    let hl = Hyperlink::new(url, HyperlinkType::External).add_run(hl_run);
+                    current_paragraph = Some(p.add_hyperlink(hl));
+                } else {
+                    current_paragraph = Some(p.add_run(run));
+                }
             }
             Event::SoftBreak | Event::HardBreak => {
                 let p = current_paragraph.take().unwrap_or_else(Paragraph::new);
