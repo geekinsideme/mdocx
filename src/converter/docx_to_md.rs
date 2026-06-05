@@ -20,20 +20,85 @@ pub fn docx_to_md(docx_bytes: &[u8]) -> Result<String, anyhow::Error> {
     };
 
     let mut md = String::new();
+    let children = &doc.document.children;
+    let mut i = 0;
 
-    for child in &doc.document.children {
-        match child {
+    while i < children.len() {
+        match &children[i] {
             DocumentChild::Paragraph(p) => {
+                let style = p.property.style.as_ref().map(|s| s.val.as_str());
+                if let Some(s) = style {
+                    if s.starts_with("CodeBlock") {
+                        let lang = if s.starts_with("CodeBlock-") {
+                            &s[10..]
+                        } else {
+                            ""
+                        };
+                        
+                        let mut code_lines = Vec::new();
+                        while i < children.len() {
+                            if let DocumentChild::Paragraph(ref next_p) = children[i] {
+                                let next_style = next_p.property.style.as_ref().map(|s| s.val.as_str());
+                                if let Some(ns) = next_style {
+                                    if ns.starts_with("CodeBlock") {
+                                        code_lines.push(paragraph_raw_text(next_p));
+                                        i += 1;
+                                        continue;
+                                    }
+                                }
+                            }
+                            break;
+                        }
+                        
+                        md.push_str("```");
+                        md.push_str(lang);
+                        md.push('\n');
+                        md.push_str(&code_lines.join("\n"));
+                        md.push_str("\n```\n\n");
+                        continue;
+                    }
+                }
+                
                 md.push_str(&paragraph_to_md(p, &find_url));
+                i += 1;
             }
             DocumentChild::Table(t) => {
                 md.push_str(&table_to_md(t, &find_url));
+                i += 1;
             }
-            _ => {}
+            _ => {
+                i += 1;
+            }
         }
     }
 
     Ok(md)
+}
+
+fn paragraph_raw_text(p: &Paragraph) -> String {
+    let mut text = String::new();
+    for child in &p.children {
+        match child {
+            ParagraphChild::Run(r) => {
+                for run_child in &r.children {
+                    match run_child {
+                        RunChild::Text(t) => {
+                            text.push_str(&t.text);
+                        }
+                        RunChild::Tab(_) => {
+                            text.push('\t');
+                        }
+                        RunChild::Break(_) => {
+                            text.push('\n');
+                        }
+                        _ => {}
+                    }
+                }
+            }
+            _ => {}
+        }
+    }
+    text
 }
 
 fn paragraph_to_md<F>(p: &Paragraph, find_url: &F) -> String
@@ -44,50 +109,6 @@ where
     
     // Check heading style
     let style = p.property.style.as_ref().map(|s| s.val.as_str());
-    
-    if let Some(s) = style {
-        if s.starts_with("CodeBlock") {
-            let lang = if s.starts_with("CodeBlock-") {
-                &s[10..]
-            } else {
-                ""
-            };
-            
-            // Extract raw text for code blocks
-            let mut raw_text = String::new();
-            for child in &p.children {
-                match child {
-                    ParagraphChild::Run(r) => {
-                        for run_child in &r.children {
-                            match run_child {
-                                RunChild::Text(t) => {
-                                    raw_text.push_str(&t.text);
-                                }
-                                RunChild::Tab(_) => {
-                                    raw_text.push('\t');
-                                }
-                                RunChild::Break(_) => {
-                                    raw_text.push('\n');
-                                }
-                                _ => {}
-                            }
-                        }
-                    }
-                    _ => {}
-                }
-            }
-            
-            md.push_str("```");
-            md.push_str(lang);
-            md.push('\n');
-            md.push_str(&raw_text);
-            if !raw_text.ends_with('\n') {
-                md.push('\n');
-            }
-            md.push_str("```\n\n");
-            return md;
-        }
-    }
 
     let heading_prefix = match style {
         Some("Heading1") => "# ",

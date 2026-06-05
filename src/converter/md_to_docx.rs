@@ -72,6 +72,7 @@ pub fn md_to_docx(md_content: &str) -> Result<Vec<u8>, anyhow::Error> {
     let mut link_url: Option<String> = None;
     let mut in_code_block = false;
     let mut in_blockquote = false;
+    let mut code_block_style: Option<String> = None;
 
     let mut table_state: Option<TableState> = None;
 
@@ -130,7 +131,6 @@ pub fn md_to_docx(md_content: &str) -> Result<Vec<u8>, anyhow::Error> {
                             docx = docx.add_paragraph(p);
                         }
                     }
-                    let mut p = Paragraph::new();
                     let style_name = match kind {
                         pulldown_cmark::CodeBlockKind::Fenced(lang) => {
                             if lang.is_empty() {
@@ -141,11 +141,8 @@ pub fn md_to_docx(md_content: &str) -> Result<Vec<u8>, anyhow::Error> {
                         }
                         pulldown_cmark::CodeBlockKind::Indented => "CodeBlock".to_string(),
                     };
-                    p = p.style(&style_name);
-                    if in_blockquote {
-                        p = p.indent(Some(720), None, None, None);
-                    }
-                    current_paragraph = Some(p);
+                    code_block_style = Some(style_name);
+                    current_paragraph = None;
                 }
                 Tag::List(start_number) => {
                     lists.push(ListState {
@@ -234,13 +231,7 @@ pub fn md_to_docx(md_content: &str) -> Result<Vec<u8>, anyhow::Error> {
                 }
                 TagEnd::CodeBlock => {
                     in_code_block = false;
-                    if let Some(p) = current_paragraph.take() {
-                        if let Some(ref mut ts) = table_state {
-                            ts.current_cell_paragraphs.push(p);
-                        } else {
-                            docx = docx.add_paragraph(p);
-                        }
-                    }
+                    code_block_style = None;
                 }
                 TagEnd::List(_) => {
                     lists.pop();
@@ -305,33 +296,42 @@ pub fn md_to_docx(md_content: &str) -> Result<Vec<u8>, anyhow::Error> {
                 _ => {}
             },
             Event::Text(text) => {
-                let mut run = Run::new();
-                
                 if in_code_block {
+                    let style_name = code_block_style.as_deref().unwrap_or("CodeBlock");
                     let lines: Vec<&str> = text.split('\n').collect();
                     for (i, line) in lines.iter().enumerate() {
-                        if i > 0 {
-                            run = run.add_break(BreakType::TextWrapping);
+                        if i == lines.len() - 1 && line.is_empty() {
+                            break;
                         }
-                        run = run.add_text(line.to_string());
+                        let mut p = Paragraph::new().style(style_name);
+                        if in_blockquote {
+                            p = p.indent(Some(720), None, None, None);
+                        }
+                        let run = Run::new()
+                            .add_text(line.to_string())
+                            .fonts(RunFonts::new().ascii("Courier New").east_asia("MS Gothic"));
+                        p = p.add_run(run);
+                        if let Some(ref mut ts) = table_state {
+                            ts.current_cell_paragraphs.push(p);
+                        } else {
+                            docx = docx.add_paragraph(p);
+                        }
                     }
-                    run = run.fonts(RunFonts::new().ascii("Courier New"));
+                    current_paragraph = None;
                 } else {
-                    run = run.add_text(text.to_string());
-                }
+                    let mut run = Run::new().add_text(text.to_string());
+                    if bold { run = run.bold(); }
+                    if italic { run = run.italic(); }
+                    if strike { run = run.strike(); }
+                    if in_blockquote { run = run.italic(); }
 
-                if bold { run = run.bold(); }
-                if italic { run = run.italic(); }
-                if strike { run = run.strike(); }
-                if in_blockquote { run = run.italic(); }
-
-                let p = current_paragraph.take().unwrap_or_else(Paragraph::new);
-                
-                if let Some(ref url) = link_url {
-                    let hl = Hyperlink::new(url, HyperlinkType::External).add_run(run);
-                    current_paragraph = Some(p.add_hyperlink(hl));
-                } else {
-                    current_paragraph = Some(p.add_run(run));
+                    let p = current_paragraph.take().unwrap_or_else(Paragraph::new);
+                    if let Some(ref url) = link_url {
+                        let hl = Hyperlink::new(url, HyperlinkType::External).add_run(run);
+                        current_paragraph = Some(p.add_hyperlink(hl));
+                    } else {
+                        current_paragraph = Some(p.add_run(run));
+                    }
                 }
             }
             Event::Code(code) => {
