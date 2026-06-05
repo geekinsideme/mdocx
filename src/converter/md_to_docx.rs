@@ -299,17 +299,47 @@ pub fn md_to_docx(md_content: &str) -> Result<Vec<u8>, anyhow::Error> {
                 if in_code_block {
                     let style_name = code_block_style.as_deref().unwrap_or("CodeBlock");
                     let lines: Vec<&str> = text.split('\n').collect();
+                    let total_lines = if lines.last().map_or(false, |l| l.is_empty()) {
+                        lines.len() - 1
+                    } else {
+                        lines.len()
+                    };
+
                     for (i, line) in lines.iter().enumerate() {
-                        if i == lines.len() - 1 && line.is_empty() {
+                        if i == total_lines {
                             break;
                         }
+
+                        let is_first = i == 0;
+                        let is_last = i == total_lines - 1;
+
                         let mut p = Paragraph::new().style(style_name);
-                        if in_blockquote {
-                            p = p.indent(Some(720), None, None, None);
+
+                        // Line spacing & spacing before/after
+                        let mut ls = LineSpacing::new().line(240).line_rule(LineSpacingType::Auto);
+                        if is_first {
+                            ls = ls.before(120);
+                        } else {
+                            ls = ls.before(0);
                         }
+                        if is_last {
+                            ls = ls.after(120);
+                        } else {
+                            ls = ls.after(0);
+                        }
+                        p = p.line_spacing(ls);
+
+                        // Indent
+                        let left_indent = if in_blockquote { 1080 } else { 360 };
+                        p = p.indent(Some(left_indent), None, None, None);
+
+                        // Run with text & shading
+                        let text_val = if line.is_empty() { " " } else { line };
                         let run = Run::new()
-                            .add_text(line.to_string())
-                            .fonts(RunFonts::new().ascii("Courier New").east_asia("MS Gothic"));
+                            .add_text(text_val.to_string())
+                            .fonts(RunFonts::new().ascii("Courier New").east_asia("MS Gothic"))
+                            .shading(Shading::new().fill("F4F5F7"));
+
                         p = p.add_run(run);
                         if let Some(ref mut ts) = table_state {
                             ts.current_cell_paragraphs.push(p);

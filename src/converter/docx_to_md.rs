@@ -98,7 +98,11 @@ fn paragraph_raw_text(p: &Paragraph) -> String {
             _ => {}
         }
     }
-    text
+    if text == " " {
+        String::new()
+    } else {
+        text
+    }
 }
 
 fn paragraph_to_md<F>(p: &Paragraph, find_url: &F) -> String
