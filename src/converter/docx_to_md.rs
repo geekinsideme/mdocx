@@ -124,6 +124,7 @@ where
         _ => "",
     };
     md.push_str(heading_prefix);
+    let is_heading = !heading_prefix.is_empty();
 
     // Check list item numbering
     let list_prefix = if let Some(ref num_prop) = p.property.numbering_property {
@@ -149,7 +150,7 @@ where
 
     let mut body = String::new();
     for child in &p.children {
-        body.push_str(&paragraph_child_to_md(child, find_url, is_blockquote));
+        body.push_str(&paragraph_child_to_md(child, find_url, is_blockquote, is_heading));
     }
 
     if is_blockquote {
@@ -177,18 +178,18 @@ where
     md
 }
 
-fn paragraph_child_to_md<F>(child: &ParagraphChild, find_url: &F, is_blockquote: bool) -> String
+fn paragraph_child_to_md<F>(child: &ParagraphChild, find_url: &F, is_blockquote: bool, is_heading: bool) -> String
 where
     F: Fn(&str) -> String,
 {
     match child {
-        ParagraphChild::Run(r) => run_to_md(r, is_blockquote),
+        ParagraphChild::Run(r) => run_to_md(r, is_blockquote, is_heading),
         ParagraphChild::Hyperlink(hl) => {
             let hl_json = serde_json::to_value(hl).unwrap_or(serde_json::Value::Null);
             let rid = hl_json["rid"].as_str().unwrap_or("");
             let url = find_url(rid);
             let text = hl.children.iter()
-                .map(|c| paragraph_child_to_md(c, find_url, is_blockquote))
+                .map(|c| paragraph_child_to_md(c, find_url, is_blockquote, is_heading))
                 .collect::<Vec<String>>()
                 .join("");
             format!("[{}]({})", text, url)
@@ -197,7 +198,7 @@ where
     }
 }
 
-fn run_to_md(r: &Run, is_blockquote: bool) -> String {
+fn run_to_md(r: &Run, is_blockquote: bool, is_heading: bool) -> String {
     let mut text = String::new();
     for child in &r.children {
         match child {
@@ -214,7 +215,7 @@ fn run_to_md(r: &Run, is_blockquote: bool) -> String {
         }
     }
 
-    let is_bold = r.run_property.bold.is_some();
+    let is_bold = r.run_property.bold.is_some() && !is_heading;
     let is_italic = r.run_property.italic.is_some() && !is_blockquote;
     let is_strike = r.run_property.strike.is_some();
     

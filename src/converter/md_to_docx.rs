@@ -73,6 +73,7 @@ pub fn md_to_docx(md_content: &str) -> Result<Vec<u8>, anyhow::Error> {
     let mut in_code_block = false;
     let mut in_blockquote = false;
     let mut code_block_style: Option<String> = None;
+    let mut heading_level: Option<HeadingLevel> = None;
 
     let mut table_state: Option<TableState> = None;
 
@@ -95,7 +96,16 @@ pub fn md_to_docx(md_content: &str) -> Result<Vec<u8>, anyhow::Error> {
                             docx = docx.add_paragraph(p);
                         }
                     }
-                    current_paragraph = Some(Paragraph::new().style(style_name));
+                    let mut p = Paragraph::new().style(style_name);
+                    let (before, after) = match level {
+                        HeadingLevel::H1 => (240, 120),
+                        HeadingLevel::H2 => (180, 80),
+                        HeadingLevel::H3 => (140, 60),
+                        _ => (120, 60),
+                    };
+                    p = p.line_spacing(LineSpacing::new().before(before).after(after));
+                    current_paragraph = Some(p);
+                    heading_level = Some(level);
                 }
                 Tag::Paragraph => {
                     if in_list_item && is_first_p_in_item {
@@ -209,6 +219,7 @@ pub fn md_to_docx(md_content: &str) -> Result<Vec<u8>, anyhow::Error> {
             },
             Event::End(tag) => match tag {
                 TagEnd::Heading(_) => {
+                    heading_level = None;
                     if let Some(p) = current_paragraph.take() {
                         if let Some(ref mut ts) = table_state {
                             ts.current_cell_paragraphs.push(p);
@@ -350,6 +361,17 @@ pub fn md_to_docx(md_content: &str) -> Result<Vec<u8>, anyhow::Error> {
                     current_paragraph = None;
                 } else {
                     let mut run = Run::new().add_text(text.to_string());
+                    if let Some(lvl) = heading_level {
+                        let size = match lvl {
+                            HeadingLevel::H1 => 40,
+                            HeadingLevel::H2 => 32,
+                            HeadingLevel::H3 => 28,
+                            HeadingLevel::H4 => 24,
+                            HeadingLevel::H5 => 22,
+                            HeadingLevel::H6 => 20,
+                        };
+                        run = run.bold().size(size).color("2F3542");
+                    }
                     if bold { run = run.bold(); }
                     if italic { run = run.italic(); }
                     if strike { run = run.strike(); }
@@ -369,6 +391,18 @@ pub fn md_to_docx(md_content: &str) -> Result<Vec<u8>, anyhow::Error> {
                     .add_text(code.to_string())
                     .fonts(RunFonts::new().ascii("Courier New"))
                     .highlight("lightGray");
+
+                if let Some(lvl) = heading_level {
+                    let size = match lvl {
+                        HeadingLevel::H1 => 40,
+                        HeadingLevel::H2 => 32,
+                        HeadingLevel::H3 => 28,
+                        HeadingLevel::H4 => 24,
+                        HeadingLevel::H5 => 22,
+                        HeadingLevel::H6 => 20,
+                    };
+                    run = run.bold().size(size).color("2F3542");
+                }
 
                 if bold { run = run.bold(); }
                 if italic { run = run.italic(); }
