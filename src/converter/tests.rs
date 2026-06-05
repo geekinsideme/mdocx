@@ -61,3 +61,35 @@ fn test_roundtrip_image_link() {
     let result_md = docx_to_md(&docx_bytes).expect("DOCX to MD failed");
     assert!(result_md.contains("[image link](https://example.com/logo.png)"));
 }
+
+#[test]
+fn test_image_local_and_fallback() {
+    use std::io::Write;
+    let temp_dir = std::env::temp_dir();
+    let temp_file_path = temp_dir.join("mdocx_test_dummy_image.png");
+    {
+        let mut file = std::fs::File::create(&temp_file_path).expect("Failed to create temp image file");
+        let png_bytes = [
+            137, 80, 78, 71, 13, 10, 26, 10, 0, 0, 0, 13, 73, 72, 68, 82, 0, 0, 0, 1, 0, 0, 0, 1, 8,
+            6, 0, 0, 0, 31, 21, 196, 137, 0, 0, 0, 10, 73, 68, 65, 84, 120, 156, 99, 0, 1, 0, 0, 5,
+            0, 1, 13, 10, 45, 180, 0, 0, 0, 0, 73, 69, 78, 68, 174, 66, 96, 130
+        ];
+        file.write_all(&png_bytes).expect("Failed to write to temp image file");
+    }
+
+    // Convert with local image
+    let md = format!("Here is a local image: ![Local Dummy Image]({})\n", temp_file_path.to_string_lossy().replace('\\', "/"));
+    let docx_bytes = md_to_docx(&md).expect("MD to DOCX with local image failed");
+    
+    let doc = docx_rs::read_docx(&docx_bytes).expect("Read DOCX failed");
+    let doc_json = serde_json::to_string(&doc).unwrap();
+    assert!(doc_json.contains("drawing") || doc_json.contains("Drawing") || doc_json.contains("pic"));
+
+    let _ = std::fs::remove_file(&temp_file_path);
+
+    // Convert with failed fetch (fallback to markdown syntax)
+    let md_fallback = "Missing image: ![Missing Alt](non_existent_file.png)\n";
+    let docx_bytes_fallback = md_to_docx(md_fallback).expect("MD to DOCX fallback failed");
+    let result_md = docx_to_md(&docx_bytes_fallback).expect("DOCX to MD fallback failed");
+    assert!(result_md.contains("![Missing Alt](non_existent_file.png)"));
+}

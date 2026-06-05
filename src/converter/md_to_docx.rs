@@ -1,5 +1,6 @@
 use docx_rs::*;
 use pulldown_cmark::{Parser, Event, Tag, TagEnd, HeadingLevel, Options};
+use std::io::Read;
 
 struct ListState {
     is_ordered: bool,
@@ -70,6 +71,8 @@ pub fn md_to_docx(md_content: &str) -> Result<Vec<u8>, anyhow::Error> {
     let mut italic = false;
     let mut strike = false;
     let mut link_url: Option<String> = None;
+    let mut image_url: Option<String> = None;
+    let mut image_alt = String::new();
     let mut in_code_block = false;
     let mut in_blockquote = false;
     let mut code_block_style: Option<String> = None;
@@ -215,6 +218,10 @@ pub fn md_to_docx(md_content: &str) -> Result<Vec<u8>, anyhow::Error> {
                 Tag::Link { dest_url, .. } => {
                     link_url = Some(dest_url.to_string());
                 }
+                Tag::Image { dest_url, .. } => {
+                    image_url = Some(dest_url.to_string());
+                    image_alt.clear();
+                }
                 _ => {}
             },
             Event::End(tag) => match tag {
@@ -304,10 +311,32 @@ pub fn md_to_docx(md_content: &str) -> Result<Vec<u8>, anyhow::Error> {
                 TagEnd::Link => {
                     link_url = None;
                 }
+                TagEnd::Image => {
+                    if let Some(url) = image_url.take() {
+                        let alt = std::mem::take(&mut image_alt);
+                        match fetch_image_bytes(&url) {
+                            Ok(bytes) => {
+                                let pic = Pic::new(&bytes).size(3000000, 2000000);
+                                let run = Run::new().add_image(pic);
+                                let p = current_paragraph.take().unwrap_or_else(Paragraph::new);
+                                current_paragraph = Some(p.add_run(run));
+                            }
+                            Err(_) => {
+                                // フォールバック：マークダウン形式のテキストとして埋め込む
+                                let fallback_text = format!("![{}]({})", alt, url);
+                                let run = Run::new().add_text(fallback_text);
+                                let p = current_paragraph.take().unwrap_or_else(Paragraph::new);
+                                current_paragraph = Some(p.add_run(run));
+                            }
+                        }
+                    }
+                }
                 _ => {}
             },
             Event::Text(text) => {
-                if in_code_block {
+                if image_url.is_some() {
+                    image_alt.push_str(&text);
+                } else if in_code_block {
                     let style_name = code_block_style.as_deref().unwrap_or("CodeBlock");
                     let lines: Vec<&str> = text.split('\n').collect();
                     let total_lines = if lines.last().map_or(false, |l| l.is_empty()) {
@@ -388,39 +417,45 @@ pub fn md_to_docx(md_content: &str) -> Result<Vec<u8>, anyhow::Error> {
                 }
             }
             Event::Code(code) => {
-                let mut run = Run::new()
-                    .add_text(code.to_string())
-                    .fonts(RunFonts::new().ascii("Courier New"))
-                    .highlight("lightGray");
-
-                if let Some(lvl) = heading_level {
-                    let size = match lvl {
-                        HeadingLevel::H1 => 40,
-                        HeadingLevel::H2 => 32,
-                        HeadingLevel::H3 => 28,
-                        HeadingLevel::H4 => 24,
-                        HeadingLevel::H5 => 22,
-                        HeadingLevel::H6 => 20,
-                    };
-                    run = run.bold().size(size).color("2F3542");
-                }
-
-                if bold { run = run.bold(); }
-                if italic { run = run.italic(); }
-                if strike { run = run.strike(); }
-
-                let p = current_paragraph.take().unwrap_or_else(Paragraph::new);
-                if let Some(ref url) = link_url {
-                    let hl_run = run.color("0563C1").underline("single");
-                    let hl = Hyperlink::new(url, HyperlinkType::External).add_run(hl_run);
-                    current_paragraph = Some(p.add_hyperlink(hl));
+                if image_url.is_some() {
+                    image_alt.push_str(&format!("`{}`", code));
                 } else {
-                    current_paragraph = Some(p.add_run(run));
+                    let mut run = Run::new()
+                        .add_text(code.to_string())
+                        .fonts(RunFonts::new().ascii("Courier New"))
+                        .highlight("lightGray");
+
+                    if let Some(lvl) = heading_level {
+                        let size = match lvl {
+                            HeadingLevel::H1 => 40,
+                            HeadingLevel::H2 => 32,
+                            HeadingLevel::H3 => 28,
+                            HeadingLevel::H4 => 24,
+                            HeadingLevel::H5 => 22,
+                            HeadingLevel::H6 => 20,
+                        };
+                        run = run.bold().size(size).color("2F3542");
+                    }
+
+                    if bold { run = run.bold(); }
+                    if italic { run = run.italic(); }
+                    if strike { run = run.strike(); }
+
+                    let p = current_paragraph.take().unwrap_or_else(Paragraph::new);
+                    if let Some(ref url) = link_url {
+                        let hl_run = run.color("0563C1").underline("single");
+                        let hl = Hyperlink::new(url, HyperlinkType::External).add_run(hl_run);
+                        current_paragraph = Some(p.add_hyperlink(hl));
+                    } else {
+                        current_paragraph = Some(p.add_run(run));
+                    }
                 }
             }
             Event::SoftBreak | Event::HardBreak => {
-                let p = current_paragraph.take().unwrap_or_else(Paragraph::new);
-                current_paragraph = Some(p.add_run(Run::new().add_break(BreakType::TextWrapping)));
+                if image_url.is_none() {
+                    let p = current_paragraph.take().unwrap_or_else(Paragraph::new);
+                    current_paragraph = Some(p.add_run(Run::new().add_break(BreakType::TextWrapping)));
+                }
             }
             Event::Rule => {
                 let p = Paragraph::new().add_run(Run::new().add_text("---"));
@@ -445,4 +480,16 @@ pub fn md_to_docx(md_content: &str) -> Result<Vec<u8>, anyhow::Error> {
     let mut buffer = std::io::Cursor::new(Vec::new());
     docx.build().pack(&mut buffer)?;
     Ok(buffer.into_inner())
+}
+
+fn fetch_image_bytes(url: &str) -> Result<Vec<u8>, anyhow::Error> {
+    if url.starts_with("http://") || url.starts_with("https://") {
+        let resp = ureq::get(url).call()?;
+        let mut bytes = Vec::new();
+        resp.into_reader().read_to_end(&mut bytes)?;
+        Ok(bytes)
+    } else {
+        let bytes = std::fs::read(url)?;
+        Ok(bytes)
+    }
 }
