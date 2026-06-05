@@ -48,4 +48,4 @@ fn main() {
 
 ## ハイパーリンクのテスト
 
-詳細については [Google のウェブサイト](https://google.com) または [Rust の公式サイト](https://rust-lang.org) を参照してください。
+詳細については [Google のウェブサイト](https://google.com) または [Rust の公式サイト](https://rust-lang.org) を参照してください。また、画像へのリンクの例として [ロゴ画像](https://www.rust-lang.org/static/images/rust-logo-blk.png) もサポートされます。

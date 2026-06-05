@@ -53,3 +53,11 @@ fn test_roundtrip_table() {
     assert!(result_md.contains("| Header 1 | Header 2 |"));
     assert!(result_md.contains("| Cell 1 | Cell 2 |"));
 }
+
+#[test]
+fn test_roundtrip_image_link() {
+    let md = "Here is an [image link](https://example.com/logo.png).\n";
+    let docx_bytes = md_to_docx(md).expect("MD to DOCX failed");
+    let result_md = docx_to_md(&docx_bytes).expect("DOCX to MD failed");
+    assert!(result_md.contains("[image link](https://example.com/logo.png)"));
+}
