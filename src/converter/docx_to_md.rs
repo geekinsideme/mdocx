@@ -1,6 +1,6 @@
 use docx_rs::*;
 
-pub fn docx_to_md(docx_bytes: &[u8]) -> Result<String, anyhow::Error> {
+pub fn docx_to_md(docx_bytes: &[u8], output_dir: Option<&std::path::Path>) -> Result<String, anyhow::Error> {
     let doc = read_docx(docx_bytes)?;
     let hyperlinks_json = serde_json::to_value(&doc.hyperlinks).unwrap_or(serde_json::Value::Null);
 
@@ -17,6 +17,29 @@ pub fn docx_to_md(docx_bytes: &[u8]) -> Result<String, anyhow::Error> {
             }
         }
         String::new()
+    };
+
+    let find_image = |rid: &str| -> Option<String> {
+        for img in &doc.images {
+            if img.0 == rid {
+                let zip_path = std::path::Path::new(&img.1);
+                let file_name = zip_path.file_name()
+                    .and_then(|f| f.to_str())
+                    .unwrap_or("image.png");
+
+                if let Some(dir) = output_dir {
+                    if let Err(e) = std::fs::create_dir_all(dir) {
+                        eprintln!("Failed to create media directory: {}", e);
+                    }
+                    let dest_path = dir.join(file_name);
+                    if let Err(e) = std::fs::write(&dest_path, &img.2.0) {
+                        eprintln!("Failed to write extracted image file: {}", e);
+                    }
+                }
+                return Some(format!("media/{}", file_name));
+            }
+        }
+        None
     };
 
     let mut md = String::new();
@@ -59,11 +82,11 @@ pub fn docx_to_md(docx_bytes: &[u8]) -> Result<String, anyhow::Error> {
                     }
                 }
                 
-                md.push_str(&paragraph_to_md(p, &find_url));
+                md.push_str(&paragraph_to_md(p, &find_url, &find_image));
                 i += 1;
             }
             DocumentChild::Table(t) => {
-                md.push_str(&table_to_md(t, &find_url));
+                md.push_str(&table_to_md(t, &find_url, &find_image));
                 i += 1;
             }
             _ => {
@@ -105,9 +128,10 @@ fn paragraph_raw_text(p: &Paragraph) -> String {
     }
 }
 
-fn paragraph_to_md<F>(p: &Paragraph, find_url: &F) -> String
+fn paragraph_to_md<F, FI>(p: &Paragraph, find_url: &F, find_image: &FI) -> String
 where
     F: Fn(&str) -> String,
+    FI: Fn(&str) -> Option<String>,
 {
     let mut md = String::new();
     
@@ -150,7 +174,7 @@ where
 
     let mut body = String::new();
     for child in &p.children {
-        body.push_str(&paragraph_child_to_md(child, find_url, is_blockquote, is_heading));
+        body.push_str(&paragraph_child_to_md(child, find_url, find_image, is_blockquote, is_heading));
     }
 
     if is_blockquote {
@@ -178,18 +202,19 @@ where
     md
 }
 
-fn paragraph_child_to_md<F>(child: &ParagraphChild, find_url: &F, is_blockquote: bool, is_heading: bool) -> String
+fn paragraph_child_to_md<F, FI>(child: &ParagraphChild, find_url: &F, find_image: &FI, is_blockquote: bool, is_heading: bool) -> String
 where
     F: Fn(&str) -> String,
+    FI: Fn(&str) -> Option<String>,
 {
     match child {
-        ParagraphChild::Run(r) => run_to_md(r, is_blockquote, is_heading),
+        ParagraphChild::Run(r) => run_to_md(r, is_blockquote, is_heading, find_image),
         ParagraphChild::Hyperlink(hl) => {
             let hl_json = serde_json::to_value(hl).unwrap_or(serde_json::Value::Null);
             let rid = hl_json["rid"].as_str().unwrap_or("");
             let url = find_url(rid);
             let text = hl.children.iter()
-                .map(|c| paragraph_child_to_md(c, find_url, is_blockquote, is_heading))
+                .map(|c| paragraph_child_to_md(c, find_url, find_image, is_blockquote, is_heading))
                 .collect::<Vec<String>>()
                 .join("");
             format!("[{}]({})", text, url)
@@ -198,7 +223,10 @@ where
     }
 }
 
-fn run_to_md(r: &Run, is_blockquote: bool, is_heading: bool) -> String {
+fn run_to_md<FI>(r: &Run, is_blockquote: bool, is_heading: bool, find_image: &FI) -> String
+where
+    FI: Fn(&str) -> Option<String>,
+{
     let mut text = String::new();
     for child in &r.children {
         match child {
@@ -210,6 +238,16 @@ fn run_to_md(r: &Run, is_blockquote: bool, is_heading: bool) -> String {
             }
             RunChild::Break(_) => {
                 text.push('\n');
+            }
+            RunChild::Drawing(drawing) => {
+                let drawing_json = serde_json::to_value(drawing).unwrap_or(serde_json::Value::Null);
+                if drawing_json["type"].as_str() == Some("pic") {
+                    if let Some(rid) = drawing_json["data"]["id"].as_str() {
+                        if let Some(img_path) = find_image(rid) {
+                            text.push_str(&format!("![image]({})", img_path));
+                        }
+                    }
+                }
             }
             _ => {}
         }
@@ -240,9 +278,10 @@ fn run_to_md(r: &Run, is_blockquote: bool, is_heading: bool) -> String {
     }
 }
 
-fn table_to_md<F>(t: &Table, find_url: &F) -> String
+fn table_to_md<F, FI>(t: &Table, find_url: &F, find_image: &FI) -> String
 where
     F: Fn(&str) -> String,
+    FI: Fn(&str) -> Option<String>,
 {
     let mut md = String::new();
     let mut is_first_row = true;
@@ -258,7 +297,7 @@ where
                             for cell_child in &cell.children {
                                 match cell_child {
                                     TableCellContent::Paragraph(p) => {
-                                        cell_text.push_str(paragraph_to_md(p, find_url).trim_end());
+                                        cell_text.push_str(paragraph_to_md(p, find_url, find_image).trim_end());
                                     }
                                     _ => {}
                                 }

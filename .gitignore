@@ -26,8 +26,10 @@ target
 /target
 
 # Generated test outputs
+/media
 *.docx
 output.md
 output_ja.md
 test_back.md
 test_ja.md
+test_image.md

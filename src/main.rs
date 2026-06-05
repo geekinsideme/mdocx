@@ -102,7 +102,11 @@ fn main() -> Result<(), anyhow::Error> {
         (Format::Docx, Format::Markdown) => {
             let docx_bytes = fs::read(input_path)
                 .with_context(|| format!("Failed to read DOCX file: {}", input_path.display()))?;
-            let md_content = converter::docx_to_md(&docx_bytes)
+            
+            let output_parent = output_path.parent().unwrap_or_else(|| Path::new("."));
+            let media_dir = output_parent.join("media");
+
+            let md_content = converter::docx_to_md(&docx_bytes, Some(&media_dir))
                 .context("Error converting DOCX to Markdown")?;
             fs::write(&output_path, md_content)
                 .with_context(|| format!("Failed to write Markdown file: {}", output_path.display()))?;
