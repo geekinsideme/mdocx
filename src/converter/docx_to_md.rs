@@ -1,8 +1,16 @@
 use docx_rs::*;
+use std::cell::{Cell, RefCell};
+use std::collections::HashMap;
 
-pub fn docx_to_md(docx_bytes: &[u8], output_dir: Option<&std::path::Path>) -> Result<String, anyhow::Error> {
+pub fn docx_to_md(
+    docx_bytes: &[u8],
+    output_dir: Option<&std::path::Path>,
+    source_docx_stem: Option<&str>,
+) -> Result<String, anyhow::Error> {
     let doc = read_docx(docx_bytes)?;
     let hyperlinks_json = serde_json::to_value(&doc.hyperlinks).unwrap_or(serde_json::Value::Null);
+    let image_counter = Cell::new(1usize);
+    let image_name_map = RefCell::new(HashMap::<String, String>::new());
 
     let find_url = |rid: &str| -> String {
         if let Some(arr) = hyperlinks_json.as_array() {
@@ -23,15 +31,36 @@ pub fn docx_to_md(docx_bytes: &[u8], output_dir: Option<&std::path::Path>) -> Re
         for img in &doc.images {
             if img.0 == rid {
                 let zip_path = std::path::Path::new(&img.1);
-                let file_name = zip_path.file_name()
+                let original_file_name = zip_path.file_name()
                     .and_then(|f| f.to_str())
                     .unwrap_or("image.png");
+
+                let file_name = if let Some(stem) = source_docx_stem.filter(|s| !s.is_empty()) {
+                    if let Some(existing) = image_name_map.borrow().get(rid) {
+                        existing.clone()
+                    } else {
+                        let ext = std::path::Path::new(original_file_name)
+                            .extension()
+                            .and_then(|e| e.to_str())
+                            .filter(|e| !e.is_empty())
+                            .unwrap_or("png");
+                        let current = image_counter.get();
+                        image_counter.set(current + 1);
+                        let generated = format!("{}_image{:03}.{}", stem, current, ext);
+                        image_name_map
+                            .borrow_mut()
+                            .insert(rid.to_string(), generated.clone());
+                        generated
+                    }
+                } else {
+                    original_file_name.to_string()
+                };
 
                 if let Some(dir) = output_dir {
                     if let Err(e) = std::fs::create_dir_all(dir) {
                         eprintln!("Failed to create media directory: {}", e);
                     }
-                    let dest_path = dir.join(file_name);
+                    let dest_path = dir.join(&file_name);
                     if let Err(e) = std::fs::write(&dest_path, &img.2.0) {
                         eprintln!("Failed to write extracted image file: {}", e);
                     }

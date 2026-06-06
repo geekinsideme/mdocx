@@ -4,7 +4,7 @@ use crate::converter::{md_to_docx, docx_to_md};
 fn test_roundtrip_formatting() {
     let md = "# Heading 1\n\nThis is a paragraph with **bold**, *italic*, and ~~strikethrough~~ text, along with some `inline code`.\n";
     let docx_bytes = md_to_docx(md).expect("MD to DOCX failed");
-    let result_md = docx_to_md(&docx_bytes, None).expect("DOCX to MD failed");
+    let result_md = docx_to_md(&docx_bytes, None, None).expect("DOCX to MD failed");
     
     // Assert headings and key text exist in the output
     assert!(result_md.contains("# Heading 1"));
@@ -18,7 +18,7 @@ fn test_roundtrip_formatting() {
 fn test_roundtrip_blockquote() {
     let md = "> This is a blockquote.\n";
     let docx_bytes = md_to_docx(md).expect("MD to DOCX failed");
-    let result_md = docx_to_md(&docx_bytes, None).expect("DOCX to MD failed");
+    let result_md = docx_to_md(&docx_bytes, None, None).expect("DOCX to MD failed");
     assert!(result_md.contains("> This is a blockquote."));
 }
 
@@ -26,7 +26,7 @@ fn test_roundtrip_blockquote() {
 fn test_roundtrip_lists() {
     let md = "* Bullet item 1\n* Bullet item 2\n\n1. Numbered item 1\n1. Numbered item 2\n";
     let docx_bytes = md_to_docx(md).expect("MD to DOCX failed");
-    let result_md = docx_to_md(&docx_bytes, None).expect("DOCX to MD failed");
+    let result_md = docx_to_md(&docx_bytes, None, None).expect("DOCX to MD failed");
     
     assert!(result_md.contains("* Bullet item 1"));
     assert!(result_md.contains("* Bullet item 2"));
@@ -38,7 +38,7 @@ fn test_roundtrip_lists() {
 fn test_roundtrip_hyperlink() {
     let md = "Check out [Google](https://google.com) for details.\n";
     let docx_bytes = md_to_docx(md).expect("MD to DOCX failed");
-    let result_md = docx_to_md(&docx_bytes, None).expect("DOCX to MD failed");
+    let result_md = docx_to_md(&docx_bytes, None, None).expect("DOCX to MD failed");
     assert!(result_md.contains("[Google](https://google.com)"));
 }
 
@@ -48,7 +48,7 @@ fn test_roundtrip_table() {
     let docx_bytes = md_to_docx(md).expect("MD to DOCX failed");
     let doc = docx_rs::read_docx(&docx_bytes).expect("Read DOCX failed");
     println!("FULL DOCX JSON FOR TABLE:\n{}", serde_json::to_string_pretty(&doc).unwrap_or_default());
-    let result_md = docx_to_md(&docx_bytes, None).expect("DOCX to MD failed");
+    let result_md = docx_to_md(&docx_bytes, None, None).expect("DOCX to MD failed");
     println!("Table result:\n{:?}", result_md);
     assert!(result_md.contains("| Header 1 | Header 2 |"));
     assert!(result_md.contains("| Cell 1 | Cell 2 |"));
@@ -58,7 +58,7 @@ fn test_roundtrip_table() {
 fn test_roundtrip_image_link() {
     let md = "Here is an [image link](https://example.com/logo.png).\n";
     let docx_bytes = md_to_docx(md).expect("MD to DOCX failed");
-    let result_md = docx_to_md(&docx_bytes, None).expect("DOCX to MD failed");
+    let result_md = docx_to_md(&docx_bytes, None, None).expect("DOCX to MD failed");
     assert!(result_md.contains("[image link](https://example.com/logo.png)"));
 }
 
@@ -90,7 +90,7 @@ fn test_image_local_and_fallback() {
     // Convert with failed fetch (fallback to markdown syntax)
     let md_fallback = "Missing image: ![Missing Alt](non_existent_file.png)\n";
     let docx_bytes_fallback = md_to_docx(md_fallback).expect("MD to DOCX fallback failed");
-    let result_md = docx_to_md(&docx_bytes_fallback, None).expect("DOCX to MD fallback failed");
+    let result_md = docx_to_md(&docx_bytes_fallback, None, None).expect("DOCX to MD fallback failed");
     assert!(result_md.contains("![Missing Alt](non_existent_file.png)"));
 }
 
@@ -115,11 +115,11 @@ fn test_docx_to_md_image_extraction() {
     let output_media_dir = temp_dir.join("mdocx_test_output_media");
     let _ = std::fs::remove_dir_all(&output_media_dir);
 
-    let result_md = docx_to_md(&docx_bytes, Some(&output_media_dir)).expect("DOCX to MD failed");
+    let result_md = docx_to_md(&docx_bytes, Some(&output_media_dir), Some("abc")).expect("DOCX to MD failed");
 
-    assert!(result_md.contains("![image](media/rIdImage1.png)"));
+    assert!(result_md.contains("![image](media/abc_image001.png)"));
     
-    let expected_extracted_path = output_media_dir.join("rIdImage1.png");
+    let expected_extracted_path = output_media_dir.join("abc_image001.png");
     assert!(expected_extracted_path.exists(), "Extracted image file does not exist!");
     
     let _ = std::fs::remove_file(&temp_file_path);

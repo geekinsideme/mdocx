@@ -105,8 +105,9 @@ fn main() -> Result<(), anyhow::Error> {
             
             let output_parent = output_path.parent().unwrap_or_else(|| Path::new("."));
             let media_dir = output_parent.join("media");
+            let source_docx_stem = input_path.file_stem().and_then(|s| s.to_str());
 
-            let md_content = converter::docx_to_md(&docx_bytes, Some(&media_dir))
+            let md_content = converter::docx_to_md(&docx_bytes, Some(&media_dir), source_docx_stem)
                 .context("Error converting DOCX to Markdown")?;
             fs::write(&output_path, md_content)
                 .with_context(|| format!("Failed to write Markdown file: {}", output_path.display()))?;
