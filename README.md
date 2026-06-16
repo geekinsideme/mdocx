@@ -46,16 +46,31 @@ mdocx input.docx
 
 ### 明示的な出力先の指定
 
-`-o` / `--out` で出力先を指定できます。
+`-o` / `--out` は**単一の出力ファイル**を指定します。
 
 ```bash
 mdocx input.md -o custom_output.docx
 ```
 
-複数入力時に `-o` を指定した場合は、**出力ディレクトリ**として扱われます。
+複数入力・ワイルドカード・ディレクトリ指定時に `-o` を使うと、結果は1つの出力ファイルにまとめられます。
+各入力ファイルの境界には次のヘッダーが入ります。
+
+```text
+###  orgfilepath
+```
 
 ```bash
-mdocx a.md b.md -o out_dir
+mdocx a.md b.md -o merged.docx
+```
+
+`-d` / `--directory` は**ファイルごとの出力ディレクトリ**を指定します。
+このときは入力側の相対ディレクトリ構造を保って出力されます。
+
+```bash
+mdocx a.md b.md -d out_dir
+
+# 例: src/sub/a.c -> out_dir/src/sub/a.docx
+mdocx src -f c -r -d out_dir
 ```
 
 ### フォーマットの明示的指定

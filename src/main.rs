@@ -16,9 +16,13 @@ struct Args {
     /// Input file paths / directories / wildcard patterns
     inputs: Vec<String>,
 
-    /// Output file path (single input) or output directory (multiple inputs)
+    /// Output file path (single output file)
     #[arg(short = 'o', long = "out")]
     output: Option<PathBuf>,
+
+    /// Output directory for per-file conversion results
+    #[arg(short = 'd', long = "directory")]
+    output_directory: Option<PathBuf>,
 
     /// Specify source format filters (repeatable, e.g., -f docx -f md or -f c -f h)
     #[arg(short = 'f', long = "from")]
@@ -46,6 +50,12 @@ enum Format {
     Markdown,
     PlainText,
     Docx,
+}
+
+#[derive(Debug, Clone)]
+struct CollectedInput {
+    path: PathBuf,
+    relative_path: PathBuf,
 }
 
 fn detect_format(path: &Path, flag: Option<&str>) -> Result<Format, anyhow::Error> {
@@ -120,6 +130,41 @@ fn has_wildcard(input: &str) -> bool {
     input.contains('*') || input.contains('?') || input.contains('[')
 }
 
+fn wildcard_base_dir(pattern: &str) -> PathBuf {
+    let wildcard_idx = pattern.find(['*', '?', '[']);
+    if let Some(idx) = wildcard_idx {
+        let prefix = &pattern[..idx];
+        let sep_idx = prefix.rfind(['/', '\\']);
+        let base = sep_idx.map(|i| &prefix[..i]).unwrap_or(".");
+        if base.is_empty() {
+            PathBuf::from(".")
+        } else {
+            PathBuf::from(base)
+        }
+    } else {
+        Path::new(pattern)
+            .parent()
+            .filter(|p| !p.as_os_str().is_empty())
+            .map(Path::to_path_buf)
+            .unwrap_or_else(|| PathBuf::from("."))
+    }
+}
+
+fn explicit_input_relative_path(raw: &str, path: &Path) -> PathBuf {
+    let raw_path = Path::new(raw);
+    if !raw_path.is_absolute() {
+        return raw_path.to_path_buf();
+    }
+
+    if let Ok(cwd) = std::env::current_dir()
+        && let Ok(rel) = path.strip_prefix(&cwd)
+    {
+        return rel.to_path_buf();
+    }
+
+    path.file_name().map(PathBuf::from).unwrap_or_else(|| PathBuf::from("input"))
+}
+
 fn normalize_filter_token(token: &str) -> Vec<String> {
     let t = token.trim().trim_start_matches('.').to_lowercase();
     match t.as_str() {
@@ -156,9 +201,10 @@ fn explicit_single_source_format(from_filters: &[String]) -> Option<&str> {
 
 fn push_if_match(
     path: PathBuf,
+    relative_path: PathBuf,
     from_ext_filter: Option<&HashSet<String>>,
     seen: &mut HashSet<PathBuf>,
-    output: &mut Vec<PathBuf>,
+    output: &mut Vec<CollectedInput>,
 ) {
     if let Some(extensions) = from_ext_filter
         && !path_matches_extensions(&path, extensions)
@@ -167,16 +213,17 @@ fn push_if_match(
     }
 
     if seen.insert(path.clone()) {
-        output.push(path);
+        output.push(CollectedInput { path, relative_path });
     }
 }
 
 fn collect_from_directory(
+    root_base: &Path,
     dir: &Path,
     from_ext_filter: &HashSet<String>,
     recursive: bool,
     seen: &mut HashSet<PathBuf>,
-    output: &mut Vec<PathBuf>,
+    output: &mut Vec<CollectedInput>,
 ) {
     let walker = if recursive {
         WalkDir::new(dir)
@@ -187,7 +234,11 @@ fn collect_from_directory(
     for entry in walker.into_iter().filter_map(Result::ok) {
         let p = entry.path();
         if p.is_file() {
-            push_if_match(p.to_path_buf(), Some(from_ext_filter), seen, output);
+            let relative = p
+                .strip_prefix(root_base)
+                .map(Path::to_path_buf)
+                .unwrap_or_else(|_| p.file_name().map(PathBuf::from).unwrap_or_else(|| PathBuf::from("input")));
+            push_if_match(p.to_path_buf(), relative, Some(from_ext_filter), seen, output);
         }
     }
 }
@@ -196,7 +247,7 @@ fn collect_source_files(
     inputs: &[String],
     from_filters: &[String],
     recursive: bool,
-) -> Result<Vec<PathBuf>, anyhow::Error> {
+) -> Result<Vec<CollectedInput>, anyhow::Error> {
     let from_ext_filter = build_from_extension_filters(from_filters);
     let has_filter = !from_ext_filter.is_empty();
 
@@ -218,11 +269,16 @@ fn collect_source_files(
             {
                 let path = entry.with_context(|| format!("Failed to read wildcard match: {}", raw))?;
                 matched = true;
+                let base_dir = wildcard_base_dir(raw);
 
                 if path.is_dir() {
-                    collect_from_directory(&path, &from_ext_filter, recursive, &mut seen, &mut files);
+                    collect_from_directory(&base_dir, &path, &from_ext_filter, recursive, &mut seen, &mut files);
                 } else if path.is_file() {
-                    push_if_match(path, Some(&from_ext_filter), &mut seen, &mut files);
+                    let relative = path
+                        .strip_prefix(&base_dir)
+                        .map(Path::to_path_buf)
+                        .unwrap_or_else(|_| path.file_name().map(PathBuf::from).unwrap_or_else(|| PathBuf::from("input")));
+                    push_if_match(path, relative, Some(&from_ext_filter), &mut seen, &mut files);
                 }
             }
 
@@ -240,9 +296,10 @@ fn collect_source_files(
                     path.display()
                 ));
             }
-            collect_from_directory(&path, &from_ext_filter, recursive, &mut seen, &mut files);
+            collect_from_directory(&path, &path, &from_ext_filter, recursive, &mut seen, &mut files);
         } else if path.is_file() {
-            push_if_match(path, if has_filter { Some(&from_ext_filter) } else { None }, &mut seen, &mut files);
+            let relative = explicit_input_relative_path(raw, &path);
+            push_if_match(path, relative, if has_filter { Some(&from_ext_filter) } else { None }, &mut seen, &mut files);
         } else {
             return Err(anyhow!("Input not found: {}", path.display()));
         }
@@ -257,20 +314,16 @@ fn collect_source_files(
 
 fn resolve_output_path(
     input_path: &Path,
+    relative_path: &Path,
     to_fmt: Format,
     append_suffix: bool,
-    output_opt: Option<&PathBuf>,
-    total_inputs: usize,
+    output_dir_opt: Option<&PathBuf>,
 ) -> Result<PathBuf, anyhow::Error> {
-    if let Some(out) = output_opt {
-        if total_inputs == 1 {
-            return Ok(out.clone());
-        }
-
+    if let Some(out) = output_dir_opt {
         if out.exists() {
             if !out.is_dir() {
                 return Err(anyhow!(
-                    "When multiple inputs are provided, -o/--out must be a directory: {}",
+                    "When -d/--directory is provided, it must be a directory: {}",
                     out.display()
                 ));
             }
@@ -279,14 +332,57 @@ fn resolve_output_path(
                 .with_context(|| format!("Failed to create output directory: {}", out.display()))?;
         }
 
-        let file_name = input_path
-            .file_name()
-            .ok_or_else(|| anyhow!("Invalid file name: {}", input_path.display()))?;
-        let generated = build_output_path(Path::new(file_name), to_fmt, append_suffix);
+        let rel = if relative_path.is_absolute() {
+            input_path
+                .file_name()
+                .map(PathBuf::from)
+                .unwrap_or_else(|| PathBuf::from("input"))
+        } else {
+            relative_path.to_path_buf()
+        };
+        let generated = build_output_path(&rel, to_fmt, append_suffix);
         return Ok(out.join(generated));
     }
 
     Ok(build_output_path(input_path, to_fmt, append_suffix))
+}
+
+fn org_path_display(path: &Path) -> String {
+    path.to_string_lossy().replace('\\', "/")
+}
+
+fn section_with_org_path(org_path: &Path, body: &str) -> String {
+    let mut section = String::new();
+    section.push_str("###  ");
+    section.push_str(&org_path_display(org_path));
+    section.push_str("\n\n");
+    section.push_str(body.trim_end());
+    section.push_str("\n\n");
+    section
+}
+
+fn latest_input_mtime(paths: &[PathBuf]) -> Result<FileTime, anyhow::Error> {
+    let mut latest: Option<FileTime> = None;
+    for p in paths {
+        let t = file_mtime(p)?;
+        latest = match latest {
+            Some(cur) if cur >= t => Some(cur),
+            _ => Some(t),
+        };
+    }
+    latest.ok_or_else(|| anyhow!("No input files to determine timestamp"))
+}
+
+fn all_inputs_match_output_timestamp(inputs: &[PathBuf], output: &Path) -> Result<bool, anyhow::Error> {
+    if !output.exists() {
+        return Ok(false);
+    }
+    for input in inputs {
+        if !timestamps_match(input, output)? {
+            return Ok(false);
+        }
+    }
+    Ok(true)
 }
 
 fn file_mtime(path: &Path) -> Result<FileTime, anyhow::Error> {
@@ -311,6 +407,10 @@ fn copy_mtime(source_path: &Path, target_path: &Path) -> Result<(), anyhow::Erro
 fn main() -> Result<(), anyhow::Error> {
     let args = Args::parse();
 
+    if args.output.is_some() && args.output_directory.is_some() {
+        return Err(anyhow!("Please specify either -o/--out or -d/--directory, not both."));
+    }
+
     if args.inputs.is_empty() {
         return Err(anyhow!("At least one input path is required."));
     }
@@ -318,11 +418,132 @@ fn main() -> Result<(), anyhow::Error> {
     let input_files = collect_source_files(&args.inputs, &args.from_format, args.recursive)
         .context("Failed to collect input files")?;
 
+    let is_batch_input = args.inputs.len() > 1
+        || args.inputs.iter().any(|raw| has_wildcard(raw) || Path::new(raw).is_dir())
+        || input_files.len() > 1;
+
+    if is_batch_input && args.output.is_some() {
+        let combined_output_path = args
+            .output
+            .as_ref()
+            .ok_or_else(|| anyhow!("Missing -o/--out output path"))?
+            .clone();
+
+        let mut input_paths = Vec::with_capacity(input_files.len());
+        for item in &input_files {
+            input_paths.push(item.path.clone());
+        }
+
+        let mut sections_md = String::new();
+        let mut combined_to_fmt: Option<Format> = None;
+
+        for item in &input_files {
+            let input_path = &item.path;
+            let from_fmt = detect_format(input_path, explicit_single_source_format(&args.from_format))
+                .with_context(|| format!("Failed to determine source format: {}", input_path.display()))?;
+
+            let to_fmt = if let Some(to_flag) = args.to_format.as_deref() {
+                detect_target_format(to_flag)
+                    .with_context(|| format!("Failed to determine target format for {}", input_path.display()))?
+            } else {
+                reverse_format(from_fmt)
+            };
+
+            if let Some(existing) = combined_to_fmt {
+                if existing != to_fmt {
+                    return Err(anyhow!(
+                        "Batch inputs resolve to different output formats. Please specify -t explicitly."
+                    ));
+                }
+            } else {
+                combined_to_fmt = Some(to_fmt);
+            }
+
+            let body_md = match (from_fmt, to_fmt) {
+                (Format::Markdown, Format::Docx) | (Format::PlainText, Format::Docx) => {
+                    let md_like = fs::read_to_string(input_path)
+                        .with_context(|| format!("Failed to read markdown file: {}", input_path.display()))?;
+                    preprocess_md_like_input(from_fmt, md_like)
+                }
+                (Format::Docx, Format::Markdown) => {
+                    let docx_bytes = fs::read(input_path)
+                        .with_context(|| format!("Failed to read DOCX file: {}", input_path.display()))?;
+                    let media_dir = combined_output_path
+                        .parent()
+                        .unwrap_or_else(|| Path::new("."))
+                        .join("media");
+                    let source_docx_stem = input_path.file_stem().and_then(|s| s.to_str());
+                    converter::docx_to_md(&docx_bytes, Some(&media_dir), source_docx_stem)
+                        .context("Error converting DOCX to Markdown")?
+                }
+                (Format::PlainText, Format::Markdown) => {
+                    let text = fs::read_to_string(input_path)
+                        .with_context(|| format!("Failed to read text file: {}", input_path.display()))?;
+                    preprocess_md_like_input(from_fmt, text)
+                }
+                _ => {
+                    return Err(anyhow!(
+                        "Unsupported conversion pair in batch mode: {:?} -> {:?} for {}",
+                        from_fmt,
+                        to_fmt,
+                        input_path.display()
+                    ));
+                }
+            };
+
+            sections_md.push_str(&section_with_org_path(&item.relative_path, &body_md));
+        }
+
+        let to_fmt = combined_to_fmt.ok_or_else(|| anyhow!("No input files to process."))?;
+
+        if let Some(parent) = combined_output_path.parent() {
+            fs::create_dir_all(parent)
+                .with_context(|| format!("Failed to create output parent directory: {}", parent.display()))?;
+        }
+
+        if args.check_timestamp
+            && all_inputs_match_output_timestamp(&input_paths, &combined_output_path)?
+        {
+            println!(
+                "Skipping conversion because timestamps are identical for all inputs: {}",
+                combined_output_path.display()
+            );
+            return Ok(());
+        }
+
+        match to_fmt {
+            Format::Docx => {
+                let docx_bytes = converter::md_to_docx(&sections_md)
+                    .context("Error converting combined Markdown to DOCX")?;
+                fs::write(&combined_output_path, docx_bytes)
+                    .with_context(|| format!("Failed to write DOCX file: {}", combined_output_path.display()))?;
+            }
+            Format::Markdown => {
+                fs::write(&combined_output_path, sections_md)
+                    .with_context(|| format!("Failed to write Markdown file: {}", combined_output_path.display()))?;
+            }
+            Format::PlainText => {
+                return Err(anyhow!("PlainText target is not supported for combined output."));
+            }
+        }
+
+        let latest = latest_input_mtime(&input_paths)?;
+        set_file_mtime(&combined_output_path, latest)
+            .with_context(|| format!("Failed to set output timestamp: {}", combined_output_path.display()))?;
+
+        println!(
+            "Conversion completed successfully! processed={}, converted=1, skipped=0",
+            input_files.len()
+        );
+        return Ok(());
+    }
+
     let total = input_files.len();
     let mut converted = 0usize;
     let mut skipped = 0usize;
 
-    for input_path in &input_files {
+    for item in &input_files {
+        let input_path = &item.path;
         let from_fmt = detect_format(input_path, explicit_single_source_format(&args.from_format))
             .with_context(|| format!("Failed to determine source format: {}", input_path.display()))?;
 
@@ -342,11 +563,22 @@ fn main() -> Result<(), anyhow::Error> {
 
         let output_path = resolve_output_path(
             input_path,
+            &item.relative_path,
             to_fmt,
             args.apend_suffix,
-            args.output.as_ref(),
-            total,
+            args.output_directory.as_ref(),
         )?;
+
+        let output_path = if let Some(out_file) = args.output.as_ref() {
+            out_file.clone()
+        } else {
+            output_path
+        };
+
+        if let Some(parent) = output_path.parent() {
+            fs::create_dir_all(parent)
+                .with_context(|| format!("Failed to create output parent directory: {}", parent.display()))?;
+        }
 
         if args.check_timestamp && output_path.exists() && timestamps_match(input_path, &output_path)? {
             println!(
