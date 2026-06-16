@@ -2,6 +2,7 @@ use std::path::{Path, PathBuf};
 use std::fs;
 use clap::Parser;
 use anyhow::{Context, anyhow};
+use filetime::{FileTime, set_file_mtime};
 
 mod converter;
 
@@ -23,6 +24,14 @@ struct Args {
     /// Explicitly specify the target format ('md' or 'docx')
     #[arg(short = 't', long = "to")]
     to_format: Option<String>,
+
+    /// Append target extension after original extension when output is auto-generated (e.g., a.docx -> a.docx.md)
+    #[arg(short = 'a', long = "apend-suffix", visible_alias = "append-suffix")]
+    apend_suffix: bool,
+
+    /// Skip conversion when input/output timestamps are already identical
+    #[arg(short = 'c', long = "check-timestamp")]
+    check_timestamp: bool,
 }
 
 #[derive(Clone, Copy, Debug, PartialEq)]
@@ -52,6 +61,45 @@ fn detect_format(path: &Path, flag: Option<&str>) -> Result<Format, anyhow::Erro
     }
 }
 
+fn build_output_path(input_path: &Path, to_fmt: Format, append_suffix: bool) -> PathBuf {
+    let new_ext = match to_fmt {
+        Format::Markdown => "md",
+        Format::Docx => "docx",
+    };
+
+    if append_suffix
+        && input_path.extension().is_some()
+        && let Some(file_name) = input_path.file_name().and_then(|n| n.to_str())
+    {
+        let mut output = input_path.to_path_buf();
+        output.set_file_name(format!("{}.{}", file_name, new_ext));
+        return output;
+    }
+
+    let mut output = input_path.to_path_buf();
+    output.set_extension(new_ext);
+    output
+}
+
+fn file_mtime(path: &Path) -> Result<FileTime, anyhow::Error> {
+    let metadata = fs::metadata(path)
+        .with_context(|| format!("Failed to read metadata: {}", path.display()))?;
+    Ok(FileTime::from_last_modification_time(&metadata))
+}
+
+fn timestamps_match(source_path: &Path, target_path: &Path) -> Result<bool, anyhow::Error> {
+    let src_time = file_mtime(source_path)?;
+    let dst_time = file_mtime(target_path)?;
+    Ok(src_time == dst_time)
+}
+
+fn copy_mtime(source_path: &Path, target_path: &Path) -> Result<(), anyhow::Error> {
+    let src_time = file_mtime(source_path)?;
+    set_file_mtime(target_path, src_time)
+        .with_context(|| format!("Failed to copy timestamp to {}", target_path.display()))?;
+    Ok(())
+}
+
 fn main() -> Result<(), anyhow::Error> {
     let args = Args::parse();
 
@@ -71,16 +119,17 @@ fn main() -> Result<(), anyhow::Error> {
     // Determine output path
     let output_path = match args.output {
         Some(path) => path,
-        None => {
-            let mut path = input_path.clone();
-            let new_ext = match to_fmt {
-                Format::Markdown => "md",
-                Format::Docx => "docx",
-            };
-            path.set_extension(new_ext);
-            path
-        }
+        None => build_output_path(input_path, to_fmt, args.apend_suffix),
     };
+
+    if args.check_timestamp && output_path.exists() && timestamps_match(input_path, &output_path)? {
+        println!(
+            "Skipping conversion because timestamps are identical: {} == {}",
+            input_path.display(),
+            output_path.display()
+        );
+        return Ok(());
+    }
 
     println!(
         "Converting {} ({:?}) -> {} ({:?})...",
@@ -115,6 +164,87 @@ fn main() -> Result<(), anyhow::Error> {
         _ => unreachable!(),
     }
 
+    copy_mtime(input_path, &output_path)
+        .context("Failed to copy source file timestamp to output file")?;
+
     println!("Conversion completed successfully!");
     Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{build_output_path, copy_mtime, timestamps_match, Format};
+    use filetime::{FileTime, set_file_mtime};
+    use std::path::{Path, PathBuf};
+    use std::time::{SystemTime, UNIX_EPOCH};
+    use std::{fs, process};
+
+    fn temp_path(prefix: &str) -> PathBuf {
+        let uniq = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .expect("system time should be after unix epoch")
+            .as_nanos();
+        std::env::temp_dir().join(format!("mdocx_{}_{}_{}", prefix, process::id(), uniq))
+    }
+
+    #[test]
+    fn build_output_path_replaces_extension_by_default() {
+        let path = Path::new("a.docx");
+        let output = build_output_path(path, Format::Markdown, false);
+        assert_eq!(output, Path::new("a.md"));
+    }
+
+    #[test]
+    fn build_output_path_appends_extension_with_suffix_option() {
+        let path = Path::new("a.docx");
+        let output = build_output_path(path, Format::Markdown, true);
+        assert_eq!(output, Path::new("a.docx.md"));
+    }
+
+    #[test]
+    fn build_output_path_keeps_default_behavior_without_original_extension() {
+        let path = Path::new("a");
+        let output = build_output_path(path, Format::Docx, true);
+        assert_eq!(output, Path::new("a.docx"));
+    }
+
+    #[test]
+    fn timestamps_match_detects_equal_and_different_times() {
+        let src = temp_path("src_eq");
+        let dst = temp_path("dst_eq");
+
+        fs::write(&src, b"src").expect("create source file");
+        fs::write(&dst, b"dst").expect("create destination file");
+
+        let t1 = FileTime::from_unix_time(1_700_000_000, 123_000_000);
+        let t2 = FileTime::from_unix_time(1_700_000_001, 0);
+
+        set_file_mtime(&src, t1).expect("set src mtime");
+        set_file_mtime(&dst, t1).expect("set dst mtime");
+        assert!(timestamps_match(&src, &dst).expect("compare equal timestamps"));
+
+        set_file_mtime(&dst, t2).expect("set dst mtime to different value");
+        assert!(!timestamps_match(&src, &dst).expect("compare different timestamps"));
+
+        let _ = fs::remove_file(&src);
+        let _ = fs::remove_file(&dst);
+    }
+
+    #[test]
+    fn copy_mtime_copies_source_timestamp_to_target() {
+        let src = temp_path("src_copy");
+        let dst = temp_path("dst_copy");
+
+        fs::write(&src, b"src").expect("create source file");
+        fs::write(&dst, b"dst").expect("create destination file");
+
+        let src_time = FileTime::from_unix_time(1_710_000_000, 999_000_000);
+        set_file_mtime(&src, src_time).expect("set src mtime");
+
+        copy_mtime(&src, &dst).expect("copy mtime from src to dst");
+        assert!(timestamps_match(&src, &dst).expect("timestamps should match after copy"));
+
+        let _ = fs::remove_file(&src);
+        let _ = fs::remove_file(&dst);
+    }
 }
