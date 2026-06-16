@@ -7,7 +7,7 @@ mod converter;
 
 #[derive(Parser, Debug)]
 #[command(name = "mdocx")]
-#[command(version = "0.1.0")]
+#[command(version)]
 #[command(about = "Converts between Markdown and DOCX formats", long_about = None)]
 struct Args {
     /// Input file path (e.g., input.md or input.docx)
@@ -43,7 +43,7 @@ fn detect_format(path: &Path, flag: Option<&str>) -> Result<Format, anyhow::Erro
     // Autodetect from extension
     if let Some(ext) = path.extension().and_then(|e| e.to_str()) {
         match ext.to_lowercase().as_str() {
-            "md" | "markdown" | "txt" => Ok(Format::Markdown),
+            "md" | "markdown" | "txt" | "c" | "h" | "log" => Ok(Format::Markdown),
             "docx" => Ok(Format::Docx),
             _ => Err(anyhow!("Could not autodetect format from file extension '.{}'. Please specify using -f/--from or -t/--to.", ext)),
         }
