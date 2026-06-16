@@ -10,7 +10,20 @@ permissions:
 
 jobs:
   build:
-    runs-on: windows-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - os: windows-latest
+            target: x86_64-pc-windows-msvc
+            binary_name: mdocx.exe
+            asset_name: mdocx-windows-x64.exe
+          - os: ubuntu-latest
+            target: x86_64-unknown-linux-gnu
+            binary_name: mdocx
+            asset_name: mdocx-linux-x64.tar.gz
+
+    runs-on: ${{ matrix.os }}
 
     steps:
       - name: Checkout
@@ -19,7 +32,7 @@ jobs:
       - name: Install Rust toolchain
         uses: dtolnay/rust-toolchain@stable
         with:
-          targets: x86_64-pc-windows-msvc
+          targets: ${{ matrix.target }}
 
       - name: Cache Cargo registry
         uses: actions/cache@v4
@@ -33,10 +46,42 @@ jobs:
             ${{ runner.os }}-cargo-
 
       - name: Build release binary
-        run: cargo build --release --target x86_64-pc-windows-msvc
+        run: cargo build --release --target ${{ matrix.target }}
+
+      - name: Stage release asset
+        shell: bash
+        run: |
+          mkdir -p dist
+          if [ "${{ matrix.os }}" = "ubuntu-latest" ]; then
+            mkdir -p package
+            cp target/${{ matrix.target }}/release/${{ matrix.binary_name }} package/mdocx
+            chmod +x package/mdocx
+            tar -czf dist/${{ matrix.asset_name }} -C package mdocx
+          else
+            cp target/${{ matrix.target }}/release/${{ matrix.binary_name }} dist/${{ matrix.asset_name }}
+          fi
+
+      - name: Upload release asset artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: ${{ matrix.asset_name }}
+          path: dist/${{ matrix.asset_name }}
+
+  release:
+    needs: build
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Download built artifacts
+        uses: actions/download-artifact@v4
+        with:
+          path: dist
+          merge-multiple: true
 
       - name: Create GitHub Release
         uses: softprops/action-gh-release@v2
         with:
-          files: target/x86_64-pc-windows-msvc/release/mdocx.exe
+          files: |
+            dist/mdocx-windows-x64.exe
+            dist/mdocx-linux-x64.tar.gz
           generate_release_notes: true

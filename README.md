@@ -16,7 +16,7 @@
   - ハイパーリンク
   - GFM テーブル（ヘッダーと各セルの構造化）
 - **クロスプラットフォーム対応**: Windows, macOS, Linux で動作。
-- **自動リリース**: タグ（`v*`）プッシュ時に GitHub Actions が自動で Windows 版実行ファイル（`.exe`）をビルドして GitHub Releases へ投稿。
+- **自動リリース**: タグ（`v*`）プッシュ時に GitHub Actions が自動で Windows x64（`.exe`）および Linux x64（`tar.gz`）をビルドして GitHub Releases へ投稿。
 
 ## インストールとビルド
 
