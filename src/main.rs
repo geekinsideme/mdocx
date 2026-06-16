@@ -1,8 +1,10 @@
-use std::path::{Path, PathBuf};
+use std::collections::HashSet;
 use std::fs;
+use std::path::{Path, PathBuf};
 use clap::Parser;
 use anyhow::{Context, anyhow};
 use filetime::{FileTime, set_file_mtime};
+use walkdir::WalkDir;
 
 mod converter;
 
@@ -11,15 +13,16 @@ mod converter;
 #[command(version)]
 #[command(about = "Converts between Markdown and DOCX formats", long_about = None)]
 struct Args {
-    /// Input file path (e.g., input.md or input.docx)
-    input: PathBuf,
+    /// Input file paths / directories / wildcard patterns
+    inputs: Vec<String>,
 
-    /// Output file path (optional, auto-generated if omitted)
+    /// Output file path (single input) or output directory (multiple inputs)
+    #[arg(short = 'o', long = "out")]
     output: Option<PathBuf>,
 
-    /// Explicitly specify the source format ('md' or 'docx')
+    /// Specify source format filters (repeatable, e.g., -f docx -f md or -f c -f h)
     #[arg(short = 'f', long = "from")]
-    from_format: Option<String>,
+    from_format: Vec<String>,
 
     /// Explicitly specify the target format ('md' or 'docx')
     #[arg(short = 't', long = "to")]
@@ -32,38 +35,44 @@ struct Args {
     /// Skip conversion when input/output timestamps are already identical
     #[arg(short = 'c', long = "check-timestamp")]
     check_timestamp: bool,
+
+    /// Recursively process subdirectories when directory input is specified
+    #[arg(short = 'r', long = "recursive")]
+    recursive: bool,
 }
 
 #[derive(Clone, Copy, Debug, PartialEq)]
 enum Format {
     Markdown,
+    PlainText,
     Docx,
 }
 
 fn detect_format(path: &Path, flag: Option<&str>) -> Result<Format, anyhow::Error> {
     if let Some(f) = flag {
-        match f.to_lowercase().as_str() {
+        match f.trim().trim_start_matches('.').to_lowercase().as_str() {
             "md" | "markdown" => return Ok(Format::Markdown),
             "docx" => return Ok(Format::Docx),
-            _ => return Err(anyhow!("Unsupported format specified: {}", f)),
+            _ => return Ok(Format::PlainText),
         }
     }
 
     // Autodetect from extension
     if let Some(ext) = path.extension().and_then(|e| e.to_str()) {
         match ext.to_lowercase().as_str() {
-            "md" | "markdown" | "txt" | "c" | "h" | "log" => Ok(Format::Markdown),
+            "md" | "markdown" => Ok(Format::Markdown),
             "docx" => Ok(Format::Docx),
-            _ => Err(anyhow!("Could not autodetect format from file extension '.{}'. Please specify using -f/--from or -t/--to.", ext)),
+            _ => Ok(Format::PlainText),
         }
     } else {
-        Err(anyhow!("File has no extension. Please specify format explicitly using -f/--from or -t/--to."))
+        Ok(Format::PlainText)
     }
 }
 
 fn build_output_path(input_path: &Path, to_fmt: Format, append_suffix: bool) -> PathBuf {
     let new_ext = match to_fmt {
         Format::Markdown => "md",
+        Format::PlainText => "txt",
         Format::Docx => "docx",
     };
 
@@ -79,6 +88,205 @@ fn build_output_path(input_path: &Path, to_fmt: Format, append_suffix: bool) -> 
     let mut output = input_path.to_path_buf();
     output.set_extension(new_ext);
     output
+}
+
+fn detect_target_format(flag: &str) -> Result<Format, anyhow::Error> {
+    match flag.trim().trim_start_matches('.').to_lowercase().as_str() {
+        "md" | "markdown" => Ok(Format::Markdown),
+        "docx" => Ok(Format::Docx),
+        _ => Err(anyhow!(
+            "Unsupported target format specified: {} (use md/markdown or docx)",
+            flag
+        )),
+    }
+}
+
+fn reverse_format(fmt: Format) -> Format {
+    match fmt {
+        Format::Markdown | Format::PlainText => Format::Docx,
+        Format::Docx => Format::Markdown,
+    }
+}
+
+fn preprocess_md_like_input(from_fmt: Format, content: String) -> String {
+    if from_fmt == Format::PlainText {
+        content.replace('\t', "    ")
+    } else {
+        content
+    }
+}
+
+fn has_wildcard(input: &str) -> bool {
+    input.contains('*') || input.contains('?') || input.contains('[')
+}
+
+fn normalize_filter_token(token: &str) -> Vec<String> {
+    let t = token.trim().trim_start_matches('.').to_lowercase();
+    match t.as_str() {
+        "md" | "markdown" => vec!["md".to_string(), "markdown".to_string()],
+        "docx" => vec!["docx".to_string()],
+        _ if !t.is_empty() => vec![t],
+        _ => Vec::new(),
+    }
+}
+
+fn build_from_extension_filters(from_filters: &[String]) -> HashSet<String> {
+    let mut set = HashSet::new();
+    for f in from_filters {
+        for ext in normalize_filter_token(f) {
+            set.insert(ext);
+        }
+    }
+    set
+}
+
+fn path_matches_extensions(path: &Path, extensions: &HashSet<String>) -> bool {
+    path.extension()
+        .and_then(|e| e.to_str())
+        .map(|e| extensions.contains(&e.to_lowercase()))
+        .unwrap_or(false)
+}
+
+fn explicit_single_source_format(from_filters: &[String]) -> Option<&str> {
+    if from_filters.len() != 1 {
+        return None;
+    }
+    Some(from_filters[0].as_str())
+}
+
+fn push_if_match(
+    path: PathBuf,
+    from_ext_filter: Option<&HashSet<String>>,
+    seen: &mut HashSet<PathBuf>,
+    output: &mut Vec<PathBuf>,
+) {
+    if let Some(extensions) = from_ext_filter
+        && !path_matches_extensions(&path, extensions)
+    {
+        return;
+    }
+
+    if seen.insert(path.clone()) {
+        output.push(path);
+    }
+}
+
+fn collect_from_directory(
+    dir: &Path,
+    from_ext_filter: &HashSet<String>,
+    recursive: bool,
+    seen: &mut HashSet<PathBuf>,
+    output: &mut Vec<PathBuf>,
+) {
+    let walker = if recursive {
+        WalkDir::new(dir)
+    } else {
+        WalkDir::new(dir).max_depth(1)
+    };
+
+    for entry in walker.into_iter().filter_map(Result::ok) {
+        let p = entry.path();
+        if p.is_file() {
+            push_if_match(p.to_path_buf(), Some(from_ext_filter), seen, output);
+        }
+    }
+}
+
+fn collect_source_files(
+    inputs: &[String],
+    from_filters: &[String],
+    recursive: bool,
+) -> Result<Vec<PathBuf>, anyhow::Error> {
+    let from_ext_filter = build_from_extension_filters(from_filters);
+    let has_filter = !from_ext_filter.is_empty();
+
+    let mut files = Vec::new();
+    let mut seen = HashSet::new();
+
+    for raw in inputs {
+        if has_wildcard(raw) {
+            if !has_filter {
+                return Err(anyhow!(
+                    "Wildcard input requires at least one -f/--from filter: {}",
+                    raw
+                ));
+            }
+
+            let mut matched = false;
+            for entry in glob::glob(raw)
+                .with_context(|| format!("Invalid wildcard pattern: {}", raw))?
+            {
+                let path = entry.with_context(|| format!("Failed to read wildcard match: {}", raw))?;
+                matched = true;
+
+                if path.is_dir() {
+                    collect_from_directory(&path, &from_ext_filter, recursive, &mut seen, &mut files);
+                } else if path.is_file() {
+                    push_if_match(path, Some(&from_ext_filter), &mut seen, &mut files);
+                }
+            }
+
+            if !matched {
+                return Err(anyhow!("No files matched wildcard pattern: {}", raw));
+            }
+            continue;
+        }
+
+        let path = PathBuf::from(raw);
+        if path.is_dir() {
+            if !has_filter {
+                return Err(anyhow!(
+                    "Directory input requires -f/--from to filter files: {}",
+                    path.display()
+                ));
+            }
+            collect_from_directory(&path, &from_ext_filter, recursive, &mut seen, &mut files);
+        } else if path.is_file() {
+            push_if_match(path, if has_filter { Some(&from_ext_filter) } else { None }, &mut seen, &mut files);
+        } else {
+            return Err(anyhow!("Input not found: {}", path.display()));
+        }
+    }
+
+    if files.is_empty() {
+        return Err(anyhow!("No input files to process."));
+    }
+
+    Ok(files)
+}
+
+fn resolve_output_path(
+    input_path: &Path,
+    to_fmt: Format,
+    append_suffix: bool,
+    output_opt: Option<&PathBuf>,
+    total_inputs: usize,
+) -> Result<PathBuf, anyhow::Error> {
+    if let Some(out) = output_opt {
+        if total_inputs == 1 {
+            return Ok(out.clone());
+        }
+
+        if out.exists() {
+            if !out.is_dir() {
+                return Err(anyhow!(
+                    "When multiple inputs are provided, -o/--out must be a directory: {}",
+                    out.display()
+                ));
+            }
+        } else {
+            fs::create_dir_all(out)
+                .with_context(|| format!("Failed to create output directory: {}", out.display()))?;
+        }
+
+        let file_name = input_path
+            .file_name()
+            .ok_or_else(|| anyhow!("Invalid file name: {}", input_path.display()))?;
+        let generated = build_output_path(Path::new(file_name), to_fmt, append_suffix);
+        return Ok(out.join(generated));
+    }
+
+    Ok(build_output_path(input_path, to_fmt, append_suffix))
 }
 
 fn file_mtime(path: &Path) -> Result<FileTime, anyhow::Error> {
@@ -103,77 +311,103 @@ fn copy_mtime(source_path: &Path, target_path: &Path) -> Result<(), anyhow::Erro
 fn main() -> Result<(), anyhow::Error> {
     let args = Args::parse();
 
-    let input_path = &args.input;
-    if !input_path.exists() {
-        return Err(anyhow!("Input file does not exist: {}", input_path.display()));
+    if args.inputs.is_empty() {
+        return Err(anyhow!("At least one input path is required."));
     }
 
-    let from_fmt = detect_format(input_path, args.from_format.as_deref())
-        .context("Failed to determine source format")?;
+    let input_files = collect_source_files(&args.inputs, &args.from_format, args.recursive)
+        .context("Failed to collect input files")?;
 
-    let to_fmt = match from_fmt {
-        Format::Markdown => Format::Docx,
-        Format::Docx => Format::Markdown,
-    };
+    let total = input_files.len();
+    let mut converted = 0usize;
+    let mut skipped = 0usize;
 
-    // Determine output path
-    let output_path = match args.output {
-        Some(path) => path,
-        None => build_output_path(input_path, to_fmt, args.apend_suffix),
-    };
+    for input_path in &input_files {
+        let from_fmt = detect_format(input_path, explicit_single_source_format(&args.from_format))
+            .with_context(|| format!("Failed to determine source format: {}", input_path.display()))?;
 
-    if args.check_timestamp && output_path.exists() && timestamps_match(input_path, &output_path)? {
+        let to_fmt = if let Some(to_flag) = args.to_format.as_deref() {
+            detect_target_format(to_flag)
+                .with_context(|| format!("Failed to determine target format for {}", input_path.display()))?
+        } else {
+            reverse_format(from_fmt)
+        };
+
+        if from_fmt == to_fmt {
+            return Err(anyhow!(
+                "Source and target formats are the same for {}. Check -f/--from and -t/--to.",
+                input_path.display()
+            ));
+        }
+
+        let output_path = resolve_output_path(
+            input_path,
+            to_fmt,
+            args.apend_suffix,
+            args.output.as_ref(),
+            total,
+        )?;
+
+        if args.check_timestamp && output_path.exists() && timestamps_match(input_path, &output_path)? {
+            println!(
+                "Skipping conversion because timestamps are identical: {} == {}",
+                input_path.display(),
+                output_path.display()
+            );
+            skipped += 1;
+            continue;
+        }
+
         println!(
-            "Skipping conversion because timestamps are identical: {} == {}",
+            "Converting {} ({:?}) -> {} ({:?})...",
             input_path.display(),
-            output_path.display()
+            from_fmt,
+            output_path.display(),
+            to_fmt
         );
-        return Ok(());
+
+        match (from_fmt, to_fmt) {
+            (Format::Markdown, Format::Docx) | (Format::PlainText, Format::Docx) => {
+                let md_content = fs::read_to_string(input_path)
+                    .with_context(|| format!("Failed to read markdown file: {}", input_path.display()))?;
+                let md_content = preprocess_md_like_input(from_fmt, md_content);
+                let docx_bytes = converter::md_to_docx(&md_content)
+                    .context("Error converting Markdown to DOCX")?;
+                fs::write(&output_path, docx_bytes)
+                    .with_context(|| format!("Failed to write DOCX file: {}", output_path.display()))?;
+            }
+            (Format::Docx, Format::Markdown) => {
+                let docx_bytes = fs::read(input_path)
+                    .with_context(|| format!("Failed to read DOCX file: {}", input_path.display()))?;
+
+                let output_parent = output_path.parent().unwrap_or_else(|| Path::new("."));
+                let media_dir = output_parent.join("media");
+                let source_docx_stem = input_path.file_stem().and_then(|s| s.to_str());
+
+                let md_content = converter::docx_to_md(&docx_bytes, Some(&media_dir), source_docx_stem)
+                    .context("Error converting DOCX to Markdown")?;
+                fs::write(&output_path, md_content)
+                    .with_context(|| format!("Failed to write Markdown file: {}", output_path.display()))?;
+            }
+            _ => unreachable!(),
+        }
+
+        copy_mtime(input_path, &output_path)
+            .context("Failed to copy source file timestamp to output file")?;
+
+        converted += 1;
     }
 
     println!(
-        "Converting {} ({:?}) -> {} ({:?})...",
-        input_path.display(),
-        from_fmt,
-        output_path.display(),
-        to_fmt
+        "Conversion completed successfully! processed={}, converted={}, skipped={}",
+        total, converted, skipped
     );
-
-    match (from_fmt, to_fmt) {
-        (Format::Markdown, Format::Docx) => {
-            let md_content = fs::read_to_string(input_path)
-                .with_context(|| format!("Failed to read markdown file: {}", input_path.display()))?;
-            let docx_bytes = converter::md_to_docx(&md_content)
-                .context("Error converting Markdown to DOCX")?;
-            fs::write(&output_path, docx_bytes)
-                .with_context(|| format!("Failed to write DOCX file: {}", output_path.display()))?;
-        }
-        (Format::Docx, Format::Markdown) => {
-            let docx_bytes = fs::read(input_path)
-                .with_context(|| format!("Failed to read DOCX file: {}", input_path.display()))?;
-            
-            let output_parent = output_path.parent().unwrap_or_else(|| Path::new("."));
-            let media_dir = output_parent.join("media");
-            let source_docx_stem = input_path.file_stem().and_then(|s| s.to_str());
-
-            let md_content = converter::docx_to_md(&docx_bytes, Some(&media_dir), source_docx_stem)
-                .context("Error converting DOCX to Markdown")?;
-            fs::write(&output_path, md_content)
-                .with_context(|| format!("Failed to write Markdown file: {}", output_path.display()))?;
-        }
-        _ => unreachable!(),
-    }
-
-    copy_mtime(input_path, &output_path)
-        .context("Failed to copy source file timestamp to output file")?;
-
-    println!("Conversion completed successfully!");
     Ok(())
 }
 
 #[cfg(test)]
 mod tests {
-    use super::{build_output_path, copy_mtime, timestamps_match, Format};
+    use super::{build_from_extension_filters, build_output_path, copy_mtime, detect_format, has_wildcard, path_matches_extensions, preprocess_md_like_input, timestamps_match, Format};
     use filetime::{FileTime, set_file_mtime};
     use std::path::{Path, PathBuf};
     use std::time::{SystemTime, UNIX_EPOCH};
@@ -206,6 +440,64 @@ mod tests {
         let path = Path::new("a");
         let output = build_output_path(path, Format::Docx, true);
         assert_eq!(output, Path::new("a.docx"));
+    }
+
+    #[test]
+    fn wildcard_detection_works() {
+        assert!(has_wildcard("*.docx"));
+        assert!(has_wildcard("file?.md"));
+        assert!(has_wildcard("[ab].md"));
+        assert!(!has_wildcard("notes.md"));
+    }
+
+    #[test]
+    fn extension_filter_supports_multiple_from_values() {
+        let filters = build_from_extension_filters(&["c".to_string(), "h".to_string()]);
+        assert!(path_matches_extensions(Path::new("a.c"), &filters));
+        assert!(path_matches_extensions(Path::new("a.h"), &filters));
+        assert!(!path_matches_extensions(Path::new("a.md"), &filters));
+    }
+
+    #[test]
+    fn markdown_alias_filter_expands_known_text_extensions() {
+        let filters = build_from_extension_filters(&["md".to_string()]);
+        assert!(path_matches_extensions(Path::new("a.md"), &filters));
+        assert!(path_matches_extensions(Path::new("a.markdown"), &filters));
+        assert!(!path_matches_extensions(Path::new("a.txt"), &filters));
+    }
+
+    #[test]
+    fn detect_format_treats_unknown_from_flag_as_plain_text() {
+        let fmt = detect_format(Path::new("dummy.unknown"), Some("rs")).expect("should parse format");
+        assert_eq!(fmt, Format::PlainText);
+
+        let fmt_c = detect_format(Path::new("dummy.unknown"), Some("c")).expect("should parse format");
+        assert_eq!(fmt_c, Format::PlainText);
+    }
+
+    #[test]
+    fn detect_format_autodetects_non_special_extensions_as_plain_text() {
+        let rs_fmt = detect_format(Path::new("main.rs"), None).expect("autodetect rs should work");
+        assert_eq!(rs_fmt, Format::PlainText);
+
+        let no_ext_fmt = detect_format(Path::new("README"), None).expect("autodetect no extension should work");
+        assert_eq!(no_ext_fmt, Format::PlainText);
+
+        let md_fmt = detect_format(Path::new("note.md"), None).expect("autodetect md should work");
+        assert_eq!(md_fmt, Format::Markdown);
+
+        let docx_fmt = detect_format(Path::new("a.docx"), None).expect("autodetect docx should work");
+        assert_eq!(docx_fmt, Format::Docx);
+    }
+
+    #[test]
+    fn preprocess_expands_tabs_only_for_non_md_text_inputs() {
+        let src = "a\tb\n\tc".to_string();
+        let c_result = preprocess_md_like_input(Format::PlainText, src.clone());
+        let md_result = preprocess_md_like_input(Format::Markdown, src);
+
+        assert_eq!(c_result, "a    b\n    c");
+        assert_eq!(md_result, "a\tb\n\tc");
     }
 
     #[test]

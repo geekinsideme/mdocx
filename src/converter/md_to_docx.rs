@@ -318,14 +318,14 @@ pub fn md_to_docx(md_content: &str) -> Result<Vec<u8>, anyhow::Error> {
                             Ok(bytes) => {
                                 let pic = Pic::new(&bytes).size(3000000, 2000000);
                                 let run = Run::new().add_image(pic);
-                                let p = current_paragraph.take().unwrap_or_else(Paragraph::new);
+                                let p = current_paragraph.take().unwrap_or_default();
                                 current_paragraph = Some(p.add_run(run));
                             }
                             Err(_) => {
                                 // フォールバック：マークダウン形式のテキストとして埋め込む
                                 let fallback_text = format!("![{}]({})", alt, url);
                                 let run = Run::new().add_text(fallback_text);
-                                let p = current_paragraph.take().unwrap_or_else(Paragraph::new);
+                                let p = current_paragraph.take().unwrap_or_default();
                                 current_paragraph = Some(p.add_run(run));
                             }
                         }
@@ -339,7 +339,7 @@ pub fn md_to_docx(md_content: &str) -> Result<Vec<u8>, anyhow::Error> {
                 } else if in_code_block {
                     let style_name = code_block_style.as_deref().unwrap_or("CodeBlock");
                     let lines: Vec<&str> = text.split('\n').collect();
-                    let total_lines = if lines.last().map_or(false, |l| l.is_empty()) {
+                    let total_lines = if lines.last().is_some_and(|l| l.is_empty()) {
                         lines.len() - 1
                     } else {
                         lines.len()
@@ -406,7 +406,7 @@ pub fn md_to_docx(md_content: &str) -> Result<Vec<u8>, anyhow::Error> {
                     if strike { run = run.strike(); }
                     if in_blockquote { run = run.italic(); }
 
-                    let p = current_paragraph.take().unwrap_or_else(Paragraph::new);
+                    let p = current_paragraph.take().unwrap_or_default();
                     if let Some(ref url) = link_url {
                         let hl_run = run.color("0563C1").underline("single");
                         let hl = Hyperlink::new(url, HyperlinkType::External).add_run(hl_run);
@@ -441,7 +441,7 @@ pub fn md_to_docx(md_content: &str) -> Result<Vec<u8>, anyhow::Error> {
                     if italic { run = run.italic(); }
                     if strike { run = run.strike(); }
 
-                    let p = current_paragraph.take().unwrap_or_else(Paragraph::new);
+                    let p = current_paragraph.take().unwrap_or_default();
                     if let Some(ref url) = link_url {
                         let hl_run = run.color("0563C1").underline("single");
                         let hl = Hyperlink::new(url, HyperlinkType::External).add_run(hl_run);
@@ -453,7 +453,7 @@ pub fn md_to_docx(md_content: &str) -> Result<Vec<u8>, anyhow::Error> {
             }
             Event::SoftBreak | Event::HardBreak => {
                 if image_url.is_none() {
-                    let p = current_paragraph.take().unwrap_or_else(Paragraph::new);
+                    let p = current_paragraph.take().unwrap_or_default();
                     current_paragraph = Some(p.add_run(Run::new().add_break(BreakType::TextWrapping)));
                 }
             }

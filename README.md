@@ -46,10 +46,16 @@ mdocx input.docx
 
 ### 明示的な出力先の指定
 
-第二引数で出力ファイルパスを指定できます。
+`-o` / `--out` で出力先を指定できます。
 
 ```bash
-mdocx input.md custom_output.docx
+mdocx input.md -o custom_output.docx
+```
+
+複数入力時に `-o` を指定した場合は、**出力ディレクトリ**として扱われます。
+
+```bash
+mdocx a.md b.md -o out_dir
 ```
 
 ### フォーマットの明示的指定
@@ -58,6 +64,50 @@ mdocx input.md custom_output.docx
 
 ```bash
 mdocx input_file_no_ext -f md -t docx
+```
+
+`-f` / `--from` は複数指定できます（特にワイルドカード・ディレクトリ入力時のフィルタ用途）。
+
+- `-f md` / `-f markdown` は Markdown 扱い
+- `-f docx` は DOCX 扱い
+- それ以外（例: `-f txt`, `-f log`, `-f c`, `-f h`, `-f rs` など）は **PlainText（.txt 相当）** として扱います
+
+```bash
+# .c と .h を対象にする
+mdocx src -f c -f h
+```
+
+### 複数ファイルの一括変換
+
+複数ファイルを引数で渡すと、すべて変換します。
+
+```bash
+mdocx a.docx b.docx c.docx
+```
+
+### Windows のワイルドカード指定
+
+ワイルドカードを使う場合は、`-f` / `--from` で対象フィルタを指定してください（複数指定可）。
+
+```bash
+mdocx "*.docx" -f docx
+mdocx "logs/*.log" -f log
+mdocx "src/*" -f c -f h
+```
+
+### ディレクトリ指定
+
+ディレクトリを指定した場合、その配下の `-f` / `--from` に該当するファイルを処理します（複数指定可）。
+
+```bash
+# 直下のみ処理
+mdocx docs -f docx
+
+# .c と .h を直下から処理
+mdocx src -f c -f h
+
+# 再帰的に処理
+mdocx docs -f docx -r
 ```
 
 ### 既存拡張子の後ろに変換先拡張子を追加
