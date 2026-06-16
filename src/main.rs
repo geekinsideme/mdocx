@@ -7,7 +7,7 @@ mod converter;
 
 #[derive(Parser, Debug)]
 #[command(name = "mdocx")]
-#[command(version = "0.1.0")]
+#[command(version)]
 #[command(about = "Converts between Markdown and DOCX formats", long_about = None)]
 struct Args {
     /// Input file path (e.g., input.md or input.docx)
