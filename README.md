@@ -109,27 +109,37 @@ mdocx a.docx b.docx c.docx
 
 ### Windows のワイルドカード指定
 
-ワイルドカードを使う場合は、`-f` / `--from` で対象フィルタを指定してください（複数指定可）。
+ワイルドカードを使う場合は、`-t` / `--to` を指定すると、**出力形式ではない側**の入力を自動で探索します。
+
+- `-t docx`: `docx` 以外の Markdown/テキストファイルを探索
+- `-t md`: `docx` ファイルを探索
+
+必要に応じて、従来どおり `-f` / `--from` で明示フィルタ指定も可能です（この場合は `-f` 優先）。
 
 ```bash
-mdocx "*.docx" -f docx
-mdocx "logs/*.log" -f log
-mdocx "src/*" -f c -f h
+mdocx "docs/*" -t docx
+mdocx "*.docx" -t md
+
+# 従来どおり -f 指定も可能
+mdocx "src/*" -f c -f h -t docx
 ```
 
 ### ディレクトリ指定
 
-ディレクトリを指定した場合、その配下の `-f` / `--from` に該当するファイルを処理します（複数指定可）。
+ディレクトリを指定した場合も同様に、`-t` 指定時は出力形式の逆側を探索して処理します。
 
 ```bash
-# 直下のみ処理
-mdocx docs -f docx
+# 直下のみ処理（docx 以外を探索して docx 化）
+mdocx docs -t docx
 
-# .c と .h を直下から処理
-mdocx src -f c -f h
+# docx を探索して md 化
+mdocx docs -t md
 
 # 再帰的に処理
-mdocx docs -f docx -r
+mdocx docs -t docx -r
+
+# もちろん -f で明示指定も可能
+mdocx src -f c -f h -r -t docx
 ```
 
 `-f` 未指定でも、`-t` を明示していれば既定の収集ルールで処理できます。

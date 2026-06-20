@@ -1,5 +1,6 @@
 use std::collections::HashSet;
 use std::fs;
+use std::io::Read;
 use std::path::{Path, PathBuf};
 use clap::Parser;
 use anyhow::{Context, anyhow};
@@ -160,25 +161,6 @@ fn is_out_option_directory_like() -> bool {
     false
 }
 
-fn effective_from_filters(from_filters: &[String], to_format: Option<&str>) -> Vec<String> {
-    if !from_filters.is_empty() {
-        return from_filters.to_vec();
-    }
-
-    match to_format.and_then(|f| detect_target_format(f).ok()) {
-        // mdocx <dir> -t docx のような指定を許可するため、既定で md/txt 系を収集
-        Some(Format::Docx) => vec![
-            "md".to_string(),
-            "markdown".to_string(),
-            "txt".to_string(),
-            "text".to_string(),
-        ],
-        // 逆方向は既定で docx を収集
-        Some(Format::Markdown) => vec!["docx".to_string()],
-        _ => Vec::new(),
-    }
-}
-
 fn has_wildcard(input: &str) -> bool {
     input.contains('*') || input.contains('?') || input.contains('[')
 }
@@ -252,15 +234,66 @@ fn explicit_single_source_format(from_filters: &[String]) -> Option<&str> {
     Some(from_filters[0].as_str())
 }
 
+fn is_probably_text_file(path: &Path) -> bool {
+    let mut file = match fs::File::open(path) {
+        Ok(f) => f,
+        Err(_) => return false,
+    };
+
+    let mut buf = [0u8; 4096];
+    let n = match file.read(&mut buf) {
+        Ok(n) => n,
+        Err(_) => return false,
+    };
+
+    let sample = &buf[..n];
+    if sample.contains(&0u8) {
+        return false;
+    }
+
+    std::str::from_utf8(sample).is_ok()
+}
+
+fn should_collect_by_target_complement(path: &Path, target_fmt: Format) -> bool {
+    let detected = match detect_format(path, None) {
+        Ok(fmt) => fmt,
+        Err(_) => return false,
+    };
+
+    match target_fmt {
+        Format::Docx => {
+            // -t docx の場合は docx 以外を対象とするが、PlainText はテキストファイルのみ
+            if detected == Format::Docx {
+                return false;
+            }
+            match detected {
+                Format::Markdown => true,
+                Format::PlainText => is_probably_text_file(path),
+                Format::Docx => false,
+            }
+        }
+        Format::Markdown => detected == Format::Docx,
+        Format::PlainText => false,
+    }
+}
+
 fn push_if_match(
     path: PathBuf,
     relative_path: PathBuf,
     from_ext_filter: Option<&HashSet<String>>,
+    target_filter: Option<Format>,
     seen: &mut HashSet<PathBuf>,
     output: &mut Vec<CollectedInput>,
 ) {
     if let Some(extensions) = from_ext_filter
         && !path_matches_extensions(&path, extensions)
+    {
+        return;
+    }
+
+    if from_ext_filter.is_none()
+        && let Some(target_fmt) = target_filter
+        && !should_collect_by_target_complement(&path, target_fmt)
     {
         return;
     }
@@ -273,7 +306,8 @@ fn push_if_match(
 fn collect_from_directory(
     root_base: &Path,
     dir: &Path,
-    from_ext_filter: &HashSet<String>,
+    from_ext_filter: Option<&HashSet<String>>,
+    target_filter: Option<Format>,
     recursive: bool,
     seen: &mut HashSet<PathBuf>,
     output: &mut Vec<CollectedInput>,
@@ -291,7 +325,7 @@ fn collect_from_directory(
                 .strip_prefix(root_base)
                 .map(Path::to_path_buf)
                 .unwrap_or_else(|_| p.file_name().map(PathBuf::from).unwrap_or_else(|| PathBuf::from("input")));
-            push_if_match(p.to_path_buf(), relative, Some(from_ext_filter), seen, output);
+            push_if_match(p.to_path_buf(), relative, from_ext_filter, target_filter, seen, output);
         }
     }
 }
@@ -299,19 +333,21 @@ fn collect_from_directory(
 fn collect_source_files(
     inputs: &[String],
     from_filters: &[String],
+    target_filter: Option<Format>,
     recursive: bool,
 ) -> Result<Vec<CollectedInput>, anyhow::Error> {
     let from_ext_filter = build_from_extension_filters(from_filters);
     let has_filter = !from_ext_filter.is_empty();
+    let has_target_filter = target_filter.is_some();
 
     let mut files = Vec::new();
     let mut seen = HashSet::new();
 
     for raw in inputs {
         if has_wildcard(raw) {
-            if !has_filter {
+            if !has_filter && !has_target_filter {
                 return Err(anyhow!(
-                    "ワイルドカード入力では -f/--from の指定が必要です: {}",
+                    "ワイルドカード入力では -f/--from または -t/--to の指定が必要です: {}",
                     raw
                 ));
             }
@@ -325,13 +361,28 @@ fn collect_source_files(
                 let base_dir = wildcard_base_dir(raw);
 
                 if path.is_dir() {
-                    collect_from_directory(&base_dir, &path, &from_ext_filter, recursive, &mut seen, &mut files);
+                    collect_from_directory(
+                        &base_dir,
+                        &path,
+                        if has_filter { Some(&from_ext_filter) } else { None },
+                        if has_filter { None } else { target_filter },
+                        recursive,
+                        &mut seen,
+                        &mut files,
+                    );
                 } else if path.is_file() {
                     let relative = path
                         .strip_prefix(&base_dir)
                         .map(Path::to_path_buf)
                         .unwrap_or_else(|_| path.file_name().map(PathBuf::from).unwrap_or_else(|| PathBuf::from("input")));
-                    push_if_match(path, relative, Some(&from_ext_filter), &mut seen, &mut files);
+                    push_if_match(
+                        path,
+                        relative,
+                        if has_filter { Some(&from_ext_filter) } else { None },
+                        if has_filter { None } else { target_filter },
+                        &mut seen,
+                        &mut files,
+                    );
                 }
             }
 
@@ -343,16 +394,32 @@ fn collect_source_files(
 
         let path = PathBuf::from(raw);
         if path.is_dir() {
-            if !has_filter {
+            if !has_filter && !has_target_filter {
                 return Err(anyhow!(
-                    "ディレクトリ入力では対象拡張子を絞るため -f/--from が必要です: {}",
+                    "ディレクトリ入力では対象拡張子を絞るため -f/--from または -t/--to が必要です: {}",
                     path.display()
                 ));
             }
-            collect_from_directory(&path, &path, &from_ext_filter, recursive, &mut seen, &mut files);
+            collect_from_directory(
+                &path,
+                &path,
+                if has_filter { Some(&from_ext_filter) } else { None },
+                if has_filter { None } else { target_filter },
+                recursive,
+                &mut seen,
+                &mut files,
+            );
         } else if path.is_file() {
             let relative = explicit_input_relative_path(raw, &path);
-            push_if_match(path, relative, if has_filter { Some(&from_ext_filter) } else { None }, &mut seen, &mut files);
+            // 明示ファイル指定時は従来どおり -f がある場合のみフィルタする
+            push_if_match(
+                path,
+                relative,
+                if has_filter { Some(&from_ext_filter) } else { None },
+                None,
+                &mut seen,
+                &mut files,
+            );
         } else {
             return Err(anyhow!("入力が見つかりません: {}", path.display()));
         }
@@ -480,10 +547,19 @@ fn main() -> Result<(), anyhow::Error> {
         return Err(anyhow!("少なくとも 1 つの入力パスが必要です。"));
     }
 
-    let from_filters = effective_from_filters(&args.from_format, args.to_format.as_deref());
+    let from_filters = args.from_format.clone();
+    let target_filter = if from_filters.is_empty() {
+        args.to_format
+            .as_deref()
+            .map(detect_target_format)
+            .transpose()
+            .with_context(|| "-t/--to の解析に失敗しました")?
+    } else {
+        None
+    };
     let output_directory = args.output_directory.as_ref().or(out_from_o_dir.as_ref());
 
-    let input_files = collect_source_files(&args.inputs, &from_filters, args.recursive)
+    let input_files = collect_source_files(&args.inputs, &from_filters, target_filter, args.recursive)
         .context("入力ファイルの収集に失敗しました")?;
 
     let is_batch_input = args.inputs.len() > 1
@@ -562,7 +638,7 @@ fn main() -> Result<(), anyhow::Error> {
             sections_md.push_str(&section_with_org_path(&item.relative_path, &body_md));
         }
 
-        let to_fmt = combined_to_fmt.ok_or_else(|| anyhow!("No input files to process."))?;
+        let to_fmt = combined_to_fmt.ok_or_else(|| anyhow!("処理対象の入力ファイルがありません。"))?;
 
         if let Some(parent) = combined_output_path.parent() {
             fs::create_dir_all(parent)
@@ -709,8 +785,9 @@ fn main() -> Result<(), anyhow::Error> {
 mod tests {
     use super::{
         build_from_extension_filters, build_output_path, copy_mtime, detect_format,
-        effective_from_filters, has_wildcard, normalize_line_endings, path_matches_extensions,
-        path_string_has_trailing_separator, preprocess_md_like_input, timestamps_match, Format,
+        has_wildcard, is_probably_text_file, normalize_line_endings, path_matches_extensions,
+        path_string_has_trailing_separator, preprocess_md_like_input,
+        should_collect_by_target_complement, timestamps_match, Format,
     };
     use filetime::{FileTime, set_file_mtime};
     use std::path::{Path, PathBuf};
@@ -819,16 +896,32 @@ mod tests {
     }
 
     #[test]
-    fn infer_from_filters_for_target_docx_or_md() {
-        let inferred_docx = effective_from_filters(&[], Some("docx"));
-        assert!(inferred_docx.contains(&"md".to_string()));
-        assert!(inferred_docx.contains(&"txt".to_string()));
+    fn target_complement_filter_for_docx_and_markdown() {
+        let md_path = temp_path("to_docx_md").with_extension("md");
+        let txt_path = temp_path("to_docx_txt").with_extension("txt");
+        let bin_path = temp_path("to_docx_bin").with_extension("bin");
+        let docx_path = temp_path("to_docx_docx").with_extension("docx");
 
-        let inferred_md = effective_from_filters(&[], Some("md"));
-        assert_eq!(inferred_md, vec!["docx".to_string()]);
+        fs::write(&md_path, "# hello\n").expect("write md file");
+        fs::write(&txt_path, "hello\nworld\n").expect("write txt file");
+        fs::write(&bin_path, [0u8, 159, 146, 150]).expect("write binary file");
+        fs::write(&docx_path, b"dummy").expect("write docx placeholder");
 
-        let explicit = effective_from_filters(&["rs".to_string()], Some("docx"));
-        assert_eq!(explicit, vec!["rs".to_string()]);
+        assert!(should_collect_by_target_complement(&md_path, Format::Docx));
+        assert!(should_collect_by_target_complement(&txt_path, Format::Docx));
+        assert!(!should_collect_by_target_complement(&bin_path, Format::Docx));
+        assert!(!should_collect_by_target_complement(&docx_path, Format::Docx));
+
+        assert!(should_collect_by_target_complement(&docx_path, Format::Markdown));
+        assert!(!should_collect_by_target_complement(&md_path, Format::Markdown));
+
+        assert!(is_probably_text_file(&txt_path));
+        assert!(!is_probably_text_file(&bin_path));
+
+        let _ = fs::remove_file(&md_path);
+        let _ = fs::remove_file(&txt_path);
+        let _ = fs::remove_file(&bin_path);
+        let _ = fs::remove_file(&docx_path);
     }
 
     #[test]
