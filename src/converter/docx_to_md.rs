@@ -57,11 +57,11 @@ pub fn docx_to_md(
 
                 if let Some(dir) = output_dir {
                     if let Err(e) = std::fs::create_dir_all(dir) {
-                        eprintln!("Failed to create media directory: {}", e);
+                        eprintln!("media ディレクトリの作成に失敗しました: {}", e);
                     }
                     let dest_path = dir.join(&file_name);
                     if let Err(e) = std::fs::write(&dest_path, &img.2.0) {
-                        eprintln!("Failed to write extracted image file: {}", e);
+                        eprintln!("抽出画像ファイルの書き込みに失敗しました: {}", e);
                     }
                 }
                 return Some(format!("media/{}", file_name));

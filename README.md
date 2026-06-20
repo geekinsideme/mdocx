@@ -52,6 +52,13 @@ mdocx input.docx
 mdocx input.md -o custom_output.docx
 ```
 
+`-o` / `--out` の指定値の末尾が `/` または `\` の場合は、`-d` / `--directory` と同等に**出力ディレクトリ**として扱われます。
+
+```bash
+# -d out_dir と同等
+mdocx docs -f docx -o out_dir/
+```
+
 複数入力・ワイルドカード・ディレクトリ指定時に `-o` を使うと、結果は1つの出力ファイルにまとめられます。
 各入力ファイルの境界には次のヘッダーが入ります。
 
@@ -125,6 +132,16 @@ mdocx src -f c -f h
 mdocx docs -f docx -r
 ```
 
+`-f` 未指定でも、`-t` を明示していれば既定の収集ルールで処理できます。
+
+- `-t docx` の場合: `md` / `markdown` / `txt` / `text` を対象として収集
+- `-t md` の場合: `docx` を対象として収集
+
+```bash
+# docs 配下の md / markdown / txt / text をまとめて docx 化
+mdocx docs -t docx -r -d out_dir
+```
+
 ### 既存拡張子の後ろに変換先拡張子を追加
 
 `-a` / `--apend-suffix` を指定すると、出力先を省略した場合に元の拡張子を保持したまま変換先拡張子を後ろへ追加します。
@@ -156,6 +173,13 @@ mdocx -a -c a.docx
 ```bash
 cargo test
 ```
+
+## v0.6.0 の主な変更点
+
+- `mdocx <ディレクトリ> -t docx` のように、`-f` 省略時でも既定フィルタでディレクトリ処理が可能
+- `-o` の末尾が `/` または `\` の場合、`-d` と同様に出力ディレクトリとして扱う挙動を追加
+- PlainText 入力の改行を正規化（`\r\n` / `\n` / `\r` を統一）し、DOCX 変換時の改行解釈を安定化
+- CLI の表示メッセージを日本語化
 
 ## ライセンス
 

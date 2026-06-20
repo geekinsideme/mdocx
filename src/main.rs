@@ -11,7 +11,7 @@ mod converter;
 #[derive(Parser, Debug)]
 #[command(name = "mdocx")]
 #[command(version)]
-#[command(about = "Converts between Markdown and DOCX formats", long_about = None)]
+#[command(about = "Markdown と DOCX を相互変換します", long_about = None)]
 struct Args {
     /// Input file paths / directories / wildcard patterns
     inputs: Vec<String>,
@@ -105,7 +105,7 @@ fn detect_target_format(flag: &str) -> Result<Format, anyhow::Error> {
         "md" | "markdown" => Ok(Format::Markdown),
         "docx" => Ok(Format::Docx),
         _ => Err(anyhow!(
-            "Unsupported target format specified: {} (use md/markdown or docx)",
+            "未対応の出力形式です: {}（md/markdown または docx を指定してください）",
             flag
         )),
     }
@@ -120,9 +120,62 @@ fn reverse_format(fmt: Format) -> Format {
 
 fn preprocess_md_like_input(from_fmt: Format, content: String) -> String {
     if from_fmt == Format::PlainText {
-        content.replace('\t', "    ")
+        normalize_line_endings(content).replace('\t', "    ")
     } else {
         content
+    }
+}
+
+fn normalize_line_endings(content: String) -> String {
+    content.replace("\r\n", "\n").replace('\r', "\n")
+}
+
+fn path_string_has_trailing_separator(path: &str) -> bool {
+    path.ends_with('/') || path.ends_with('\\')
+}
+
+fn is_out_option_directory_like() -> bool {
+    let mut args = std::env::args();
+    let _program = args.next();
+
+    while let Some(arg) = args.next() {
+        if arg == "-o" || arg == "--out" {
+            if let Some(value) = args.next() {
+                return path_string_has_trailing_separator(&value);
+            }
+            return false;
+        }
+
+        if let Some(value) = arg.strip_prefix("--out=") {
+            return path_string_has_trailing_separator(value);
+        }
+
+        if let Some(value) = arg.strip_prefix("-o")
+            && !value.is_empty()
+        {
+            return path_string_has_trailing_separator(value);
+        }
+    }
+
+    false
+}
+
+fn effective_from_filters(from_filters: &[String], to_format: Option<&str>) -> Vec<String> {
+    if !from_filters.is_empty() {
+        return from_filters.to_vec();
+    }
+
+    match to_format.and_then(|f| detect_target_format(f).ok()) {
+        // mdocx <dir> -t docx のような指定を許可するため、既定で md/txt 系を収集
+        Some(Format::Docx) => vec![
+            "md".to_string(),
+            "markdown".to_string(),
+            "txt".to_string(),
+            "text".to_string(),
+        ],
+        // 逆方向は既定で docx を収集
+        Some(Format::Markdown) => vec!["docx".to_string()],
+        _ => Vec::new(),
     }
 }
 
@@ -258,16 +311,16 @@ fn collect_source_files(
         if has_wildcard(raw) {
             if !has_filter {
                 return Err(anyhow!(
-                    "Wildcard input requires at least one -f/--from filter: {}",
+                    "ワイルドカード入力では -f/--from の指定が必要です: {}",
                     raw
                 ));
             }
 
             let mut matched = false;
             for entry in glob::glob(raw)
-                .with_context(|| format!("Invalid wildcard pattern: {}", raw))?
+                .with_context(|| format!("無効なワイルドカードパターンです: {}", raw))?
             {
-                let path = entry.with_context(|| format!("Failed to read wildcard match: {}", raw))?;
+                let path = entry.with_context(|| format!("ワイルドカード一致結果の読み取りに失敗しました: {}", raw))?;
                 matched = true;
                 let base_dir = wildcard_base_dir(raw);
 
@@ -283,7 +336,7 @@ fn collect_source_files(
             }
 
             if !matched {
-                return Err(anyhow!("No files matched wildcard pattern: {}", raw));
+                return Err(anyhow!("ワイルドカードに一致するファイルがありません: {}", raw));
             }
             continue;
         }
@@ -292,7 +345,7 @@ fn collect_source_files(
         if path.is_dir() {
             if !has_filter {
                 return Err(anyhow!(
-                    "Directory input requires -f/--from to filter files: {}",
+                    "ディレクトリ入力では対象拡張子を絞るため -f/--from が必要です: {}",
                     path.display()
                 ));
             }
@@ -301,12 +354,12 @@ fn collect_source_files(
             let relative = explicit_input_relative_path(raw, &path);
             push_if_match(path, relative, if has_filter { Some(&from_ext_filter) } else { None }, &mut seen, &mut files);
         } else {
-            return Err(anyhow!("Input not found: {}", path.display()));
+            return Err(anyhow!("入力が見つかりません: {}", path.display()));
         }
     }
 
     if files.is_empty() {
-        return Err(anyhow!("No input files to process."));
+        return Err(anyhow!("処理対象の入力ファイルがありません。"));
     }
 
     Ok(files)
@@ -323,13 +376,13 @@ fn resolve_output_path(
         if out.exists() {
             if !out.is_dir() {
                 return Err(anyhow!(
-                    "When -d/--directory is provided, it must be a directory: {}",
+                    "-d/--directory にはディレクトリを指定してください: {}",
                     out.display()
                 ));
             }
         } else {
             fs::create_dir_all(out)
-                .with_context(|| format!("Failed to create output directory: {}", out.display()))?;
+                .with_context(|| format!("出力ディレクトリの作成に失敗しました: {}", out.display()))?;
         }
 
         let rel = if relative_path.is_absolute() {
@@ -370,7 +423,7 @@ fn latest_input_mtime(paths: &[PathBuf]) -> Result<FileTime, anyhow::Error> {
             _ => Some(t),
         };
     }
-    latest.ok_or_else(|| anyhow!("No input files to determine timestamp"))
+    latest.ok_or_else(|| anyhow!("タイムスタンプ比較対象の入力ファイルがありません"))
 }
 
 fn all_inputs_match_output_timestamp(inputs: &[PathBuf], output: &Path) -> Result<bool, anyhow::Error> {
@@ -387,7 +440,7 @@ fn all_inputs_match_output_timestamp(inputs: &[PathBuf], output: &Path) -> Resul
 
 fn file_mtime(path: &Path) -> Result<FileTime, anyhow::Error> {
     let metadata = fs::metadata(path)
-        .with_context(|| format!("Failed to read metadata: {}", path.display()))?;
+        .with_context(|| format!("メタデータの読み取りに失敗しました: {}", path.display()))?;
     Ok(FileTime::from_last_modification_time(&metadata))
 }
 
@@ -400,33 +453,48 @@ fn timestamps_match(source_path: &Path, target_path: &Path) -> Result<bool, anyh
 fn copy_mtime(source_path: &Path, target_path: &Path) -> Result<(), anyhow::Error> {
     let src_time = file_mtime(source_path)?;
     set_file_mtime(target_path, src_time)
-        .with_context(|| format!("Failed to copy timestamp to {}", target_path.display()))?;
+        .with_context(|| format!("タイムスタンプのコピーに失敗しました: {}", target_path.display()))?;
     Ok(())
 }
 
 fn main() -> Result<(), anyhow::Error> {
     let args = Args::parse();
 
-    if args.output.is_some() && args.output_directory.is_some() {
-        return Err(anyhow!("Please specify either -o/--out or -d/--directory, not both."));
+    let out_as_dir_hint = is_out_option_directory_like();
+    let mut out_from_o_dir: Option<PathBuf> = None;
+    let mut explicit_output_file = args.output.clone();
+
+    if args.output_directory.is_none()
+        && let Some(out) = args.output.as_ref()
+        && (out_as_dir_hint || out.is_dir())
+    {
+        out_from_o_dir = Some(out.clone());
+        explicit_output_file = None;
+    }
+
+    if explicit_output_file.is_some() && args.output_directory.is_some() {
+        return Err(anyhow!("-o/--out と -d/--directory は同時に指定できません。"));
     }
 
     if args.inputs.is_empty() {
-        return Err(anyhow!("At least one input path is required."));
+        return Err(anyhow!("少なくとも 1 つの入力パスが必要です。"));
     }
 
-    let input_files = collect_source_files(&args.inputs, &args.from_format, args.recursive)
-        .context("Failed to collect input files")?;
+    let from_filters = effective_from_filters(&args.from_format, args.to_format.as_deref());
+    let output_directory = args.output_directory.as_ref().or(out_from_o_dir.as_ref());
+
+    let input_files = collect_source_files(&args.inputs, &from_filters, args.recursive)
+        .context("入力ファイルの収集に失敗しました")?;
 
     let is_batch_input = args.inputs.len() > 1
         || args.inputs.iter().any(|raw| has_wildcard(raw) || Path::new(raw).is_dir())
         || input_files.len() > 1;
 
-    if is_batch_input && args.output.is_some() {
+    if is_batch_input && explicit_output_file.is_some() {
         let combined_output_path = args
             .output
             .as_ref()
-            .ok_or_else(|| anyhow!("Missing -o/--out output path"))?
+            .ok_or_else(|| anyhow!("-o/--out の出力パスが見つかりません"))?
             .clone();
 
         let mut input_paths = Vec::with_capacity(input_files.len());
@@ -439,12 +507,12 @@ fn main() -> Result<(), anyhow::Error> {
 
         for item in &input_files {
             let input_path = &item.path;
-            let from_fmt = detect_format(input_path, explicit_single_source_format(&args.from_format))
-                .with_context(|| format!("Failed to determine source format: {}", input_path.display()))?;
+            let from_fmt = detect_format(input_path, explicit_single_source_format(&from_filters))
+                .with_context(|| format!("入力形式の判定に失敗しました: {}", input_path.display()))?;
 
             let to_fmt = if let Some(to_flag) = args.to_format.as_deref() {
                 detect_target_format(to_flag)
-                    .with_context(|| format!("Failed to determine target format for {}", input_path.display()))?
+                    .with_context(|| format!("出力形式の判定に失敗しました: {}", input_path.display()))?
             } else {
                 reverse_format(from_fmt)
             };
@@ -452,7 +520,7 @@ fn main() -> Result<(), anyhow::Error> {
             if let Some(existing) = combined_to_fmt {
                 if existing != to_fmt {
                     return Err(anyhow!(
-                        "Batch inputs resolve to different output formats. Please specify -t explicitly."
+                        "バッチ入力で出力形式が混在しています。-t で明示指定してください。"
                     ));
                 }
             } else {
@@ -462,28 +530,28 @@ fn main() -> Result<(), anyhow::Error> {
             let body_md = match (from_fmt, to_fmt) {
                 (Format::Markdown, Format::Docx) | (Format::PlainText, Format::Docx) => {
                     let md_like = fs::read_to_string(input_path)
-                        .with_context(|| format!("Failed to read markdown file: {}", input_path.display()))?;
+                        .with_context(|| format!("Markdown/テキストファイルの読み取りに失敗しました: {}", input_path.display()))?;
                     preprocess_md_like_input(from_fmt, md_like)
                 }
                 (Format::Docx, Format::Markdown) => {
                     let docx_bytes = fs::read(input_path)
-                        .with_context(|| format!("Failed to read DOCX file: {}", input_path.display()))?;
+                        .with_context(|| format!("DOCX ファイルの読み取りに失敗しました: {}", input_path.display()))?;
                     let media_dir = combined_output_path
                         .parent()
                         .unwrap_or_else(|| Path::new("."))
                         .join("media");
                     let source_docx_stem = input_path.file_stem().and_then(|s| s.to_str());
                     converter::docx_to_md(&docx_bytes, Some(&media_dir), source_docx_stem)
-                        .context("Error converting DOCX to Markdown")?
+                        .context("DOCX から Markdown への変換に失敗しました")?
                 }
                 (Format::PlainText, Format::Markdown) => {
                     let text = fs::read_to_string(input_path)
-                        .with_context(|| format!("Failed to read text file: {}", input_path.display()))?;
+                        .with_context(|| format!("テキストファイルの読み取りに失敗しました: {}", input_path.display()))?;
                     preprocess_md_like_input(from_fmt, text)
                 }
                 _ => {
                     return Err(anyhow!(
-                        "Unsupported conversion pair in batch mode: {:?} -> {:?} for {}",
+                        "バッチモードでは未対応の変換組み合わせです: {:?} -> {:?} ({})",
                         from_fmt,
                         to_fmt,
                         input_path.display()
@@ -498,14 +566,14 @@ fn main() -> Result<(), anyhow::Error> {
 
         if let Some(parent) = combined_output_path.parent() {
             fs::create_dir_all(parent)
-                .with_context(|| format!("Failed to create output parent directory: {}", parent.display()))?;
+                .with_context(|| format!("出力先ディレクトリの作成に失敗しました: {}", parent.display()))?;
         }
 
         if args.check_timestamp
             && all_inputs_match_output_timestamp(&input_paths, &combined_output_path)?
         {
             println!(
-                "Skipping conversion because timestamps are identical for all inputs: {}",
+                "すべての入力でタイムスタンプが一致しているため変換をスキップしました: {}",
                 combined_output_path.display()
             );
             return Ok(());
@@ -514,25 +582,25 @@ fn main() -> Result<(), anyhow::Error> {
         match to_fmt {
             Format::Docx => {
                 let docx_bytes = converter::md_to_docx(&sections_md)
-                    .context("Error converting combined Markdown to DOCX")?;
+                    .context("結合した Markdown から DOCX への変換に失敗しました")?;
                 fs::write(&combined_output_path, docx_bytes)
-                    .with_context(|| format!("Failed to write DOCX file: {}", combined_output_path.display()))?;
+                    .with_context(|| format!("DOCX ファイルの書き込みに失敗しました: {}", combined_output_path.display()))?;
             }
             Format::Markdown => {
                 fs::write(&combined_output_path, sections_md)
-                    .with_context(|| format!("Failed to write Markdown file: {}", combined_output_path.display()))?;
+                    .with_context(|| format!("Markdown ファイルの書き込みに失敗しました: {}", combined_output_path.display()))?;
             }
             Format::PlainText => {
-                return Err(anyhow!("PlainText target is not supported for combined output."));
+                return Err(anyhow!("結合出力では PlainText を出力先にできません。"));
             }
         }
 
         let latest = latest_input_mtime(&input_paths)?;
         set_file_mtime(&combined_output_path, latest)
-            .with_context(|| format!("Failed to set output timestamp: {}", combined_output_path.display()))?;
+            .with_context(|| format!("出力ファイルのタイムスタンプ設定に失敗しました: {}", combined_output_path.display()))?;
 
         println!(
-            "Conversion completed successfully! processed={}, converted=1, skipped=0",
+            "変換が完了しました。処理件数={}, 変換=1, スキップ=0",
             input_files.len()
         );
         return Ok(());
@@ -544,19 +612,19 @@ fn main() -> Result<(), anyhow::Error> {
 
     for item in &input_files {
         let input_path = &item.path;
-        let from_fmt = detect_format(input_path, explicit_single_source_format(&args.from_format))
-            .with_context(|| format!("Failed to determine source format: {}", input_path.display()))?;
+        let from_fmt = detect_format(input_path, explicit_single_source_format(&from_filters))
+            .with_context(|| format!("入力形式の判定に失敗しました: {}", input_path.display()))?;
 
         let to_fmt = if let Some(to_flag) = args.to_format.as_deref() {
             detect_target_format(to_flag)
-                .with_context(|| format!("Failed to determine target format for {}", input_path.display()))?
+                .with_context(|| format!("出力形式の判定に失敗しました: {}", input_path.display()))?
         } else {
             reverse_format(from_fmt)
         };
 
         if from_fmt == to_fmt {
             return Err(anyhow!(
-                "Source and target formats are the same for {}. Check -f/--from and -t/--to.",
+                "入力形式と出力形式が同じです: {}。-f/--from と -t/--to を確認してください。",
                 input_path.display()
             ));
         }
@@ -566,10 +634,10 @@ fn main() -> Result<(), anyhow::Error> {
             &item.relative_path,
             to_fmt,
             args.apend_suffix,
-            args.output_directory.as_ref(),
+            output_directory,
         )?;
 
-        let output_path = if let Some(out_file) = args.output.as_ref() {
+        let output_path = if let Some(out_file) = explicit_output_file.as_ref() {
             out_file.clone()
         } else {
             output_path
@@ -577,12 +645,12 @@ fn main() -> Result<(), anyhow::Error> {
 
         if let Some(parent) = output_path.parent() {
             fs::create_dir_all(parent)
-                .with_context(|| format!("Failed to create output parent directory: {}", parent.display()))?;
+                .with_context(|| format!("出力先ディレクトリの作成に失敗しました: {}", parent.display()))?;
         }
 
         if args.check_timestamp && output_path.exists() && timestamps_match(input_path, &output_path)? {
             println!(
-                "Skipping conversion because timestamps are identical: {} == {}",
+                "タイムスタンプが一致しているため変換をスキップしました: {} == {}",
                 input_path.display(),
                 output_path.display()
             );
@@ -591,7 +659,7 @@ fn main() -> Result<(), anyhow::Error> {
         }
 
         println!(
-            "Converting {} ({:?}) -> {} ({:?})...",
+            "変換中: {} ({:?}) -> {} ({:?})",
             input_path.display(),
             from_fmt,
             output_path.display(),
@@ -601,37 +669,37 @@ fn main() -> Result<(), anyhow::Error> {
         match (from_fmt, to_fmt) {
             (Format::Markdown, Format::Docx) | (Format::PlainText, Format::Docx) => {
                 let md_content = fs::read_to_string(input_path)
-                    .with_context(|| format!("Failed to read markdown file: {}", input_path.display()))?;
+                    .with_context(|| format!("Markdown/テキストファイルの読み取りに失敗しました: {}", input_path.display()))?;
                 let md_content = preprocess_md_like_input(from_fmt, md_content);
                 let docx_bytes = converter::md_to_docx(&md_content)
-                    .context("Error converting Markdown to DOCX")?;
+                    .context("Markdown から DOCX への変換に失敗しました")?;
                 fs::write(&output_path, docx_bytes)
-                    .with_context(|| format!("Failed to write DOCX file: {}", output_path.display()))?;
+                    .with_context(|| format!("DOCX ファイルの書き込みに失敗しました: {}", output_path.display()))?;
             }
             (Format::Docx, Format::Markdown) => {
                 let docx_bytes = fs::read(input_path)
-                    .with_context(|| format!("Failed to read DOCX file: {}", input_path.display()))?;
+                    .with_context(|| format!("DOCX ファイルの読み取りに失敗しました: {}", input_path.display()))?;
 
                 let output_parent = output_path.parent().unwrap_or_else(|| Path::new("."));
                 let media_dir = output_parent.join("media");
                 let source_docx_stem = input_path.file_stem().and_then(|s| s.to_str());
 
                 let md_content = converter::docx_to_md(&docx_bytes, Some(&media_dir), source_docx_stem)
-                    .context("Error converting DOCX to Markdown")?;
+                    .context("DOCX から Markdown への変換に失敗しました")?;
                 fs::write(&output_path, md_content)
-                    .with_context(|| format!("Failed to write Markdown file: {}", output_path.display()))?;
+                    .with_context(|| format!("Markdown ファイルの書き込みに失敗しました: {}", output_path.display()))?;
             }
             _ => unreachable!(),
         }
 
         copy_mtime(input_path, &output_path)
-            .context("Failed to copy source file timestamp to output file")?;
+            .context("入力ファイルのタイムスタンプを出力へコピーできませんでした")?;
 
         converted += 1;
     }
 
     println!(
-        "Conversion completed successfully! processed={}, converted={}, skipped={}",
+        "変換が完了しました。処理件数={}, 変換={}, スキップ={}",
         total, converted, skipped
     );
     Ok(())
@@ -639,7 +707,11 @@ fn main() -> Result<(), anyhow::Error> {
 
 #[cfg(test)]
 mod tests {
-    use super::{build_from_extension_filters, build_output_path, copy_mtime, detect_format, has_wildcard, path_matches_extensions, preprocess_md_like_input, timestamps_match, Format};
+    use super::{
+        build_from_extension_filters, build_output_path, copy_mtime, detect_format,
+        effective_from_filters, has_wildcard, normalize_line_endings, path_matches_extensions,
+        path_string_has_trailing_separator, preprocess_md_like_input, timestamps_match, Format,
+    };
     use filetime::{FileTime, set_file_mtime};
     use std::path::{Path, PathBuf};
     use std::time::{SystemTime, UNIX_EPOCH};
@@ -730,6 +802,33 @@ mod tests {
 
         assert_eq!(c_result, "a    b\n    c");
         assert_eq!(md_result, "a\tb\n\tc");
+    }
+
+    #[test]
+    fn normalize_line_endings_supports_crlf_and_cr() {
+        let src = "a\r\nb\rc\n".to_string();
+        let normalized = normalize_line_endings(src);
+        assert_eq!(normalized, "a\nb\nc\n");
+    }
+
+    #[test]
+    fn detect_trailing_separator_hint_for_output_path() {
+        assert!(path_string_has_trailing_separator("out/"));
+        assert!(path_string_has_trailing_separator("out\\"));
+        assert!(!path_string_has_trailing_separator("out.docx"));
+    }
+
+    #[test]
+    fn infer_from_filters_for_target_docx_or_md() {
+        let inferred_docx = effective_from_filters(&[], Some("docx"));
+        assert!(inferred_docx.contains(&"md".to_string()));
+        assert!(inferred_docx.contains(&"txt".to_string()));
+
+        let inferred_md = effective_from_filters(&[], Some("md"));
+        assert_eq!(inferred_md, vec!["docx".to_string()]);
+
+        let explicit = effective_from_filters(&["rs".to_string()], Some("docx"));
+        assert_eq!(explicit, vec!["rs".to_string()]);
     }
 
     #[test]
