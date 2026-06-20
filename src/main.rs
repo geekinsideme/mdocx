@@ -59,6 +59,22 @@ struct CollectedInput {
     relative_path: PathBuf,
 }
 
+// ---------- 新規追加 ----------
+/// 先頭 1 KiB 以内に NUL バイトが含まれていたらバイナリとみなす
+fn is_binary(path: &Path) -> bool {
+    const CHUNK_SIZE: usize = 1024;
+    let mut file = match fs::File::open(path) {
+        Ok(f) => f,
+        Err(_) => return false, // 読めなければテキストとみなす（エラーは上位で処理）
+    };
+    let mut buffer = [0u8; CHUNK_SIZE];
+    match file.read(&mut buffer) {
+        Ok(n) => buffer[..n].contains(&0),
+        Err(_) => false,
+    }
+}
+// ---------- ここまで ----------
+
 fn detect_format(path: &Path, flag: Option<&str>) -> Result<Format, anyhow::Error> {
     if let Some(f) = flag {
         match f.trim().trim_start_matches('.').to_lowercase().as_str() {
@@ -321,6 +337,10 @@ fn collect_from_directory(
     for entry in walker.into_iter().filter_map(Result::ok) {
         let p = entry.path();
         if p.is_file() {
+            // バイナリファイルは除外
+            if is_binary(p) {
+                continue;
+            }
             let relative = p
                 .strip_prefix(root_base)
                 .map(Path::to_path_buf)
@@ -371,6 +391,10 @@ fn collect_source_files(
                         &mut files,
                     );
                 } else if path.is_file() {
+                    // バイナリファイルは除外
+                    if is_binary(&path) {
+                        continue;
+                    }
                     let relative = path
                         .strip_prefix(&base_dir)
                         .map(Path::to_path_buf)
@@ -410,6 +434,10 @@ fn collect_source_files(
                 &mut files,
             );
         } else if path.is_file() {
+            // バイナリファイルは除外
+            if is_binary(&path) {
+                continue;
+            }
             let relative = explicit_input_relative_path(raw, &path);
             // 明示ファイル指定時は従来どおり -f がある場合のみフィルタする
             push_if_match(
