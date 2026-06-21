@@ -9,6 +9,25 @@ use walkdir::WalkDir;
 
 mod converter;
 
+fn should_print_help(args: &[String]) -> bool {
+    args.iter().any(|a| a == "-h" || a == "--help")
+}
+
+fn should_print_version(args: &[String]) -> bool {
+    args.iter().any(|a| a == "-V" || a == "--version")
+}
+
+fn print_help_japanese() {
+    println!(
+        "mdocx {}\nMarkdown と DOCX を相互変換します\n\n使い方:\n  mdocx [オプション] [入力パス]...\n\n引数:\n  [入力パス]...  入力ファイルパス / ディレクトリ / ワイルドカード\n\nオプション:\n  -o, --out <OUTPUT>                  出力ファイルパス（単一出力ファイル）\n  -d, --directory <OUTPUT_DIRECTORY>  出力ディレクトリ（入力ごとに出力）\n  -f, --from <FROM_FORMAT>            変換元形式フィルタ（複数指定可）\n  -t, --to <TO_FORMAT>                変換先形式（md または docx）\n  -a, --append-suffix                 出力自動生成時に拡張子を末尾へ追加\n                                      （例: a.docx -> a.docx.md）\n  -c, --check-timestamp               入出力の更新日時が一致する場合は変換をスキップ\n  -r, --recursive                     ディレクトリ入力時にサブディレクトリを再帰処理\n  -h, --help                          このヘルプを表示\n  -V, --version                       バージョンを表示",
+        env!("CARGO_PKG_VERSION")
+    );
+}
+
+fn print_version_japanese() {
+    println!("mdocx {}", env!("CARGO_PKG_VERSION"));
+}
+
 #[derive(Parser, Debug)]
 #[command(name = "mdocx")]
 #[command(version)]
@@ -34,8 +53,8 @@ struct Args {
     to_format: Option<String>,
 
     /// Append target extension after original extension when output is auto-generated (e.g., a.docx -> a.docx.md)
-    #[arg(short = 'a', long = "apend-suffix", visible_alias = "append-suffix")]
-    apend_suffix: bool,
+    #[arg(short = 'a', long = "append-suffix")]
+    append_suffix: bool,
 
     /// Skip conversion when input/output timestamps are already identical
     #[arg(short = 'c', long = "check-timestamp")]
@@ -553,6 +572,16 @@ fn copy_mtime(source_path: &Path, target_path: &Path) -> Result<(), anyhow::Erro
 }
 
 fn main() -> Result<(), anyhow::Error> {
+    let raw_args: Vec<String> = std::env::args().skip(1).collect();
+    if should_print_help(&raw_args) {
+        print_help_japanese();
+        return Ok(());
+    }
+    if should_print_version(&raw_args) {
+        print_version_japanese();
+        return Ok(());
+    }
+
     let args = Args::parse();
 
     let out_as_dir_hint = is_out_option_directory_like();
@@ -737,7 +766,7 @@ fn main() -> Result<(), anyhow::Error> {
             input_path,
             &item.relative_path,
             to_fmt,
-            args.apend_suffix,
+            args.append_suffix,
             output_directory,
         )?;
 
